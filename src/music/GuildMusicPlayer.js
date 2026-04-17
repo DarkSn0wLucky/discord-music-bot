@@ -129,27 +129,26 @@ class GuildMusicPlayer {
         this.currentTrack = { ...next, startedAt: Date.now() };
 
         try {
-          console.log(`[Play] Starting track: ${next.title}`);
+          console.log(`[Play] Запуск трека: ${next.title} | ${next.url}`);
 
           const { spawn } = require("child_process");
 
-          const ytDlpProcess = spawn("yt-dlp", [
+          const ytDlp = spawn("yt-dlp", [
             "-o", "-",
             "-f", "bestaudio/best",
             "--no-playlist",
             "--no-warnings",
             "--quiet",
+            "--buffer-size", "64K",
             next.url
-          ], {
-            stdio: ["ignore", "pipe", "pipe"]
+          ], { stdio: ["ignore", "pipe", "pipe"] });
+
+          ytDlp.stderr.on("data", (data) => {
+            const msg = data.toString().trim();
+            if (msg) console.error(`[yt-dlp] ${msg}`);
           });
 
-          // Логируем ошибки yt-dlp
-          ytDlpProcess.stderr.on("data", (data) => {
-            console.error(`[yt-dlp stderr] ${data.toString().trim()}`);
-          });
-
-          const resource = createAudioResource(ytDlpProcess.stdout, {
+          const resource = createAudioResource(ytDlp.stdout, {
             inputType: StreamType.Arbitrary,
             inlineVolume: true,
           });
@@ -165,19 +164,18 @@ class GuildMusicPlayer {
 
           this.startProgressUpdater();
 
-          // Важно: ждём, пока трек действительно начнёт играть
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          // Даём время на запуск потока
+          await new Promise(r => setTimeout(r, 2000));
 
-          return; // успешно запустили
+          return; // успешно стартовали
 
         } catch (error) {
-          console.error(`[Play] Error playing ${next.title}:`, error.message);
+          console.error(`[Play Error] ${next.title}:`, error.message);
           this.currentTrack = null;
-          await this.sendAction("Трек пропущен", `[${safeLinkText(next.title)}](${next.url})\n\`${error.message}\``);
+          await this.sendAction("Трек пропущен", `**${safeLinkText(next.title)}**\n\`${error.message}\``);
         }
       }
 
-      // Очередь закончилась
       this.currentTrack = null;
       await this.refreshPanel();
       this.scheduleAutoDisconnect();
@@ -371,12 +369,62 @@ class GuildMusicPlayer {
       }
     }
 
-    // Отправляем новое сообщение, если старого нет
     try {
       const message = await channel.send(payload);
       this.panelMessageId = message.id;
     } catch (error) {
       console.error(`[Panel:${this.guild.id}] Не удалось отправить панель:`, error.message);
+    }
+  }
+
+  async sendQueue() {
+    const channel = await this.getTextChannel();
+    if (!channel) return;
+    await channel.send({ embeds: [buildQueueEmbed(this)] });
+  }
+
+  async sendAction(title, description) {
+    const channel = await this.getTextChannel();
+    if (!channel) return;
+    await channel.send({ embeds: [buildActionEmbed(title, description)] });
+  }
+
+  startProgressUpdater() {
+    this.stopProgressUpdater();
+    if (!this.currentTrack) return;
+
+    this.updateInterval = setInterval(async () => {
+      if (this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing) {
+        await this.refreshPanel().catch(() => {});
+      } else {
+        this.stopProgressUpdater();
+      }
+    }, 10000); // увеличил до 10 секунд, чтобы меньше нагружать
+  }
+
+  stopProgressUpdater() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+      this.updateInterval = null;
+    }
+  }
+
+  async clearPanel() {
+    if (!this.panelMessageId) return;
+
+    const channel = await this.getTextChannel();
+    if (!channel) {
+      this.panelMessageId = null;
+      return;
+    }
+
+    try {
+      const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+      if (message) await message.delete().catch(() => {});
+    } catch (err) {
+      console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
+    } finally {
+      this.panelMessageId = null;
     }
   }
 
