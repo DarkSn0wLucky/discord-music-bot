@@ -129,18 +129,27 @@ class GuildMusicPlayer {
         this.currentTrack = { ...next, startedAt: Date.now() };
 
         try {
-          const { spawn } = require("child_process");
-          function createStream(url) {
-            return spawn("yt-dlp", [
-              "-o", "-", 
-              "-f", "bestaudio",
-              "--no-playlist",
-              url
-            ], { stdio: ["ignore", "pipe", "ignore"] }).stdout;
-          }
+          console.log(`[Play] Starting track: ${next.title}`);
 
-          const stream = createStream(next.url);
-          const resource = createAudioResource(stream, {
+          const { spawn } = require("child_process");
+
+          const ytDlpProcess = spawn("yt-dlp", [
+            "-o", "-",
+            "-f", "bestaudio/best",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            next.url
+          ], {
+            stdio: ["ignore", "pipe", "pipe"]
+          });
+
+          // Логируем ошибки yt-dlp
+          ytDlpProcess.stderr.on("data", (data) => {
+            console.error(`[yt-dlp stderr] ${data.toString().trim()}`);
+          });
+
+          const resource = createAudioResource(ytDlpProcess.stdout, {
             inputType: StreamType.Arbitrary,
             inlineVolume: true,
           });
@@ -150,20 +159,29 @@ class GuildMusicPlayer {
           }
 
           this.player.play(resource);
+
           await this.refreshPanel();
           await this.sendAction("Старт", `[${safeLinkText(next.title)}](${next.url})`);
 
           this.startProgressUpdater();
-          return;
+
+          // Важно: ждём, пока трек действительно начнёт играть
+          await new Promise(resolve => setTimeout(resolve, 1500));
+
+          return; // успешно запустили
+
         } catch (error) {
+          console.error(`[Play] Error playing ${next.title}:`, error.message);
           this.currentTrack = null;
           await this.sendAction("Трек пропущен", `[${safeLinkText(next.title)}](${next.url})\n\`${error.message}\``);
         }
       }
 
+      // Очередь закончилась
       this.currentTrack = null;
       await this.refreshPanel();
       this.scheduleAutoDisconnect();
+
     } finally {
       this.transitionLock = false;
     }
