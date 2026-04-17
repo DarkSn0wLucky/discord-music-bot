@@ -9,6 +9,7 @@ const {
   joinVoiceChannel,
   StreamType,
 } = require("@discordjs/voice");
+
 const play = require("play-dl");
 const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE } = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
@@ -18,24 +19,20 @@ class GuildMusicPlayer {
   constructor({ guild, client }) {
     this.guild = guild;
     this.client = client;
-
     this.queue = [];
     this.currentTrack = null;
     this.loopMode = "off";
     this.forceSkip = false;
     this.transitionLock = false;
-
     this.textChannelId = null;
     this.panelMessageId = null;
     this.voiceChannelId = null;
     this.connection = null;
     this.boundConnection = null;
     this.autoDisconnectTimer = null;
-
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
-
     this.updateInterval = null;
 
     this.player.on(AudioPlayerStatus.Idle, () => {
@@ -75,7 +72,6 @@ class GuildMusicPlayer {
 
   async connect(voiceChannel) {
     this.clearAutoDisconnect();
-
     const existing = getVoiceConnection(this.guild.id);
     if (existing && existing.joinConfig.channelId !== voiceChannel.id) {
       existing.destroy();
@@ -98,10 +94,7 @@ class GuildMusicPlayer {
     if (this.boundConnection !== this.connection) {
       this.boundConnection = this.connection;
       this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-        if (!this.connection) {
-          return;
-        }
-
+        if (!this.connection) return;
         try {
           await Promise.race([
             entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
@@ -121,14 +114,11 @@ class GuildMusicPlayer {
       await this.refreshPanel();
       return;
     }
-
     await this.playNext();
   }
 
   async playNext() {
-    if (this.transitionLock) {
-      return;
-    }
+    if (this.transitionLock) return;
 
     this.transitionLock = true;
     this.clearAutoDisconnect();
@@ -140,20 +130,16 @@ class GuildMusicPlayer {
 
         try {
           const { spawn } = require("child_process");
-
           function createStream(url) {
             return spawn("yt-dlp", [
-              "-o", "-",
+              "-o", "-", 
               "-f", "bestaudio",
               "--no-playlist",
               url
-            ], {
-              stdio: ["ignore", "pipe", "ignore"]
-            }).stdout;
+            ], { stdio: ["ignore", "pipe", "ignore"] }).stdout;
           }
 
           const stream = createStream(next.url);
-
           const resource = createAudioResource(stream, {
             inputType: StreamType.Arbitrary,
             inlineVolume: true,
@@ -166,8 +152,7 @@ class GuildMusicPlayer {
           this.player.play(resource);
           await this.refreshPanel();
           await this.sendAction("Старт", `[${safeLinkText(next.title)}](${next.url})`);
-          
-          // ← ЗАПУСКАЕМ ЖИВОЙ ПРОГРЕСС
+
           this.startProgressUpdater();
           return;
         } catch (error) {
@@ -196,7 +181,6 @@ class GuildMusicPlayer {
     const skipped = this.forceSkip;
     this.forceSkip = false;
 
-    // ← ОСТАНАВЛИВАЕМ ПРОГРЕСС ПРИ ЗАВЕРШЕНИИ ТРЕКА
     this.stopProgressUpdater();
 
     if (!skipped) {
@@ -226,30 +210,34 @@ class GuildMusicPlayer {
 
     const paused = this.player.pause(true);
     await this.refreshPanel();
-    return paused ? { ok: true, message: "Поставлено на паузу." } : { ok: false, message: "Не удалось поставить на паузу." };
+    return paused 
+      ? { ok: true, message: "Поставлено на паузу." } 
+      : { ok: false, message: "Не удалось поставить на паузу." };
   }
 
   async pause() {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нет активного трека." };
     }
-
     const paused = this.player.pause(true);
     await this.refreshPanel();
-    return paused ? { ok: true, message: "Пауза." } : { ok: false, message: "Не удалось поставить на паузу." };
+    return paused 
+      ? { ok: true, message: "Пауза." } 
+      : { ok: false, message: "Не удалось поставить на паузу." };
   }
 
   async resume() {
     const resumed = this.player.unpause();
     await this.refreshPanel();
-    return resumed ? { ok: true, message: "Продолжаю." } : { ok: false, message: "Не удалось продолжить." };
+    return resumed 
+      ? { ok: true, message: "Продолжаю." } 
+      : { ok: false, message: "Не удалось продолжить." };
   }
 
   async skip() {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нечего скипать." };
     }
-
     this.forceSkip = true;
     this.player.stop(true);
     await this.sendAction("Скип", "Текущий трек пропущен.");
@@ -257,52 +245,46 @@ class GuildMusicPlayer {
   }
 
   async stop() {
-    // ← ОСТАНАВЛИВАЕМ ПРОГРЕСС ПРИ СТОПЕ
     this.stopProgressUpdater();
-
     const hadTracks = Boolean(this.currentTrack) || this.queue.length > 0;
+
     this.clearAutoDisconnect();
     this.queue = [];
     this.currentTrack = null;
     this.forceSkip = true;
     this.player.stop(true);
+
     await this.disconnectFromVoice(true);
-    await this.clearPanel();
-    return hadTracks ? { ok: true, message: "Очередь очищена, бот отключён." } : { ok: false, message: "Очередь уже пуста." };
+    await this.clearPanel();                    // ← очищаем панель при стопе
+
+    return hadTracks 
+      ? { ok: true, message: "Очередь очищена, бот отключён." } 
+      : { ok: false, message: "Очередь уже пуста." };
   }
 
   async shuffle() {
     if (this.queue.length < 2) {
       return { ok: false, message: "Для шафла нужно минимум 2 трека в очереди." };
     }
-
     for (let i = this.queue.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
     }
-
     await this.refreshPanel();
     return { ok: true, message: "Очередь перемешана." };
   }
 
   async cycleLoopMode() {
-    if (this.loopMode === "off") {
-      this.loopMode = "track";
-    } else if (this.loopMode === "track") {
-      this.loopMode = "queue";
-    } else {
-      this.loopMode = "off";
-    }
+    if (this.loopMode === "off") this.loopMode = "track";
+    else if (this.loopMode === "track") this.loopMode = "queue";
+    else this.loopMode = "off";
 
     await this.refreshPanel();
     return this.loopMode;
   }
 
   async setLoopMode(mode) {
-    if (!["off", "track", "queue"].includes(mode)) {
-      return false;
-    }
-
+    if (!["off", "track", "queue"].includes(mode)) return false;
     this.loopMode = mode;
     await this.refreshPanel();
     return true;
@@ -312,27 +294,20 @@ class GuildMusicPlayer {
     if (sendNotice) {
       await this.sendAction("Стоп", reason);
     }
-
     if (this.connection) {
       this.connection.destroy();
     }
-
     this.connection = null;
     this.boundConnection = null;
     this.voiceChannelId = null;
   }
 
   scheduleAutoDisconnect() {
-    if (!this.connection || AUTO_DISCONNECT_MS <= 0 || this.autoDisconnectTimer) {
-      return;
-    }
+    if (!this.connection || AUTO_DISCONNECT_MS <= 0 || this.autoDisconnectTimer) return;
 
     this.autoDisconnectTimer = setTimeout(async () => {
       this.autoDisconnectTimer = null;
-
-      if (this.currentTrack || this.queue.length > 0 || !this.connection) {
-        return;
-      }
+      if (this.currentTrack || this.queue.length > 0 || !this.connection) return;
 
       await this.disconnectFromVoice(true, "Пустая очередь более 3 минут.");
       await this.refreshPanel();
@@ -340,23 +315,16 @@ class GuildMusicPlayer {
   }
 
   clearAutoDisconnect() {
-    if (!this.autoDisconnectTimer) {
-      return;
-    }
-
+    if (!this.autoDisconnectTimer) return;
     clearTimeout(this.autoDisconnectTimer);
     this.autoDisconnectTimer = null;
   }
 
   async getTextChannel() {
-    if (!this.textChannelId) {
-      return null;
-    }
+    if (!this.textChannelId) return null;
 
     const cached = this.client.channels.cache.get(this.textChannelId);
-    if (cached?.isTextBased()) {
-      return cached;
-    }
+    if (cached?.isTextBased()) return cached;
 
     try {
       const fetched = await this.client.channels.fetch(this.textChannelId);
@@ -368,9 +336,7 @@ class GuildMusicPlayer {
 
   async refreshPanel() {
     const channel = await this.getTextChannel();
-    if (!channel) {
-      return;
-    }
+    if (!channel) return;
 
     const payload = {
       embeds: [buildPlayerEmbed(this)],
@@ -387,7 +353,7 @@ class GuildMusicPlayer {
       }
     }
 
-    // Если старого сообщения нет или оно удалено — отправляем новое
+    // Отправляем новое сообщение, если старого нет
     try {
       const message = await channel.send(payload);
       this.panelMessageId = message.id;
@@ -398,19 +364,13 @@ class GuildMusicPlayer {
 
   async sendQueue() {
     const channel = await this.getTextChannel();
-    if (!channel) {
-      return;
-    }
-
+    if (!channel) return;
     await channel.send({ embeds: [buildQueueEmbed(this)] });
   }
 
   async sendAction(title, description) {
     const channel = await this.getTextChannel();
-    if (!channel) {
-      return;
-    }
-
+    if (!channel) return;
     await channel.send({
       embeds: [buildActionEmbed(title, description)],
     });
@@ -427,7 +387,7 @@ class GuildMusicPlayer {
       } else {
         this.stopProgressUpdater();
       }
-    }, 8000); // каждые 8 секунд (можно поставить 5000)
+    }, 8000);
   }
 
   stopProgressUpdater() {
@@ -436,27 +396,28 @@ class GuildMusicPlayer {
       this.updateInterval = null;
     }
   }
-}
 
-async clearPanel() {
-  if (!this.panelMessageId) return;
+  // Метод очистки панели
+  async clearPanel() {
+    if (!this.panelMessageId) return;
 
-  const channel = await this.getTextChannel();
-  if (!channel) {
-    this.panelMessageId = null;
-    return;
-  }
-
-  try {
-    const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
-    if (message) {
-      await message.delete().catch(() => {});
+    const channel = await this.getTextChannel();
+    if (!channel) {
+      this.panelMessageId = null;
+      return;
     }
-  } catch (err) {
-    console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
-  } finally {
-    this.panelMessageId = null;
-   }
+
+    try {
+      const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+      if (message) {
+        await message.delete().catch(() => {});
+      }
+    } catch (err) {
+      console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
+    } finally {
+      this.panelMessageId = null;
+    }
+  }
 }
 
 module.exports = {
