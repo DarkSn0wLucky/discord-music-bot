@@ -30,9 +30,11 @@ class GuildMusicPlayer {
     this.connection = null;
     this.boundConnection = null;
     this.autoDisconnectTimer = null;
+
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
+
     this.updateInterval = null;
 
     this.player.on(AudioPlayerStatus.Idle, () => {
@@ -129,23 +131,24 @@ class GuildMusicPlayer {
         this.currentTrack = { ...next, startedAt: Date.now() };
 
         try {
-          console.log(`[Play] Запуск трека: ${next.title} | ${next.url}`);
+          console.log(`[Play] Запуск: ${next.title}`);
 
           const { spawn } = require("child_process");
 
           const ytDlp = spawn("yt-dlp", [
             "-o", "-",
-            "-f", "bestaudio/best",
+            "-f", "bestaudio[ext=m4a]/bestaudio/best",
             "--no-playlist",
             "--no-warnings",
             "--quiet",
-            "--buffer-size", "64K",
+            "--buffer-size", "128K",
+            "--geo-bypass",
             next.url
           ], { stdio: ["ignore", "pipe", "pipe"] });
 
           ytDlp.stderr.on("data", (data) => {
-            const msg = data.toString().trim();
-            if (msg) console.error(`[yt-dlp] ${msg}`);
+            const line = data.toString().trim();
+            if (line) console.error(`[yt-dlp] ${line}`);
           });
 
           const resource = createAudioResource(ytDlp.stdout, {
@@ -164,10 +167,10 @@ class GuildMusicPlayer {
 
           this.startProgressUpdater();
 
-          // Даём время на запуск потока
-          await new Promise(r => setTimeout(r, 2000));
+          // Даём время на инициализацию потока
+          await new Promise(r => setTimeout(r, 2500));
 
-          return; // успешно стартовали
+          return;
 
         } catch (error) {
           console.error(`[Play Error] ${next.title}:`, error.message);
@@ -215,7 +218,6 @@ class GuildMusicPlayer {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нет активного трека." };
     }
-
     if (this.isPaused()) {
       const resumed = this.player.unpause();
       await this.refreshPanel();
@@ -223,11 +225,10 @@ class GuildMusicPlayer {
         ? { ok: true, message: "Продолжаю воспроизведение." }
         : { ok: false, message: "Не удалось продолжить." };
     }
-
     const paused = this.player.pause(true);
     await this.refreshPanel();
-    return paused 
-      ? { ok: true, message: "Поставлено на паузу." } 
+    return paused
+      ? { ok: true, message: "Поставлено на паузу." }
       : { ok: false, message: "Не удалось поставить на паузу." };
   }
 
@@ -237,16 +238,16 @@ class GuildMusicPlayer {
     }
     const paused = this.player.pause(true);
     await this.refreshPanel();
-    return paused 
-      ? { ok: true, message: "Пауза." } 
+    return paused
+      ? { ok: true, message: "Пауза." }
       : { ok: false, message: "Не удалось поставить на паузу." };
   }
 
   async resume() {
     const resumed = this.player.unpause();
     await this.refreshPanel();
-    return resumed 
-      ? { ok: true, message: "Продолжаю." } 
+    return resumed
+      ? { ok: true, message: "Продолжаю." }
       : { ok: false, message: "Не удалось продолжить." };
   }
 
@@ -271,10 +272,10 @@ class GuildMusicPlayer {
     this.player.stop(true);
 
     await this.disconnectFromVoice(true);
-    await this.clearPanel();                    // ← очищаем панель при стопе
+    await this.clearPanel();
 
-    return hadTracks 
-      ? { ok: true, message: "Очередь очищена, бот отключён." } 
+    return hadTracks
+      ? { ok: true, message: "Очередь очищена, бот отключён." }
       : { ok: false, message: "Очередь уже пуста." };
   }
 
@@ -324,7 +325,6 @@ class GuildMusicPlayer {
     this.autoDisconnectTimer = setTimeout(async () => {
       this.autoDisconnectTimer = null;
       if (this.currentTrack || this.queue.length > 0 || !this.connection) return;
-
       await this.disconnectFromVoice(true, "Пустая очередь более 3 минут.");
       await this.refreshPanel();
     }, AUTO_DISCONNECT_MS);
@@ -399,7 +399,7 @@ class GuildMusicPlayer {
       } else {
         this.stopProgressUpdater();
       }
-    }, 10000); // увеличил до 10 секунд, чтобы меньше нагружать
+    }, 10000);
   }
 
   stopProgressUpdater() {
@@ -421,63 +421,6 @@ class GuildMusicPlayer {
     try {
       const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
       if (message) await message.delete().catch(() => {});
-    } catch (err) {
-      console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
-    } finally {
-      this.panelMessageId = null;
-    }
-  }
-
-  async sendQueue() {
-    const channel = await this.getTextChannel();
-    if (!channel) return;
-    await channel.send({ embeds: [buildQueueEmbed(this)] });
-  }
-
-  async sendAction(title, description) {
-    const channel = await this.getTextChannel();
-    if (!channel) return;
-    await channel.send({
-      embeds: [buildActionEmbed(title, description)],
-    });
-  }
-
-  // === ЖИВОЙ ПРОГРЕСС-БАР ===
-  startProgressUpdater() {
-    this.stopProgressUpdater();
-    if (!this.currentTrack) return;
-
-    this.updateInterval = setInterval(async () => {
-      if (this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing) {
-        await this.refreshPanel().catch(() => {});
-      } else {
-        this.stopProgressUpdater();
-      }
-    }, 8000);
-  }
-
-  stopProgressUpdater() {
-    if (this.updateInterval) {
-      clearInterval(this.updateInterval);
-      this.updateInterval = null;
-    }
-  }
-
-  // Метод очистки панели
-  async clearPanel() {
-    if (!this.panelMessageId) return;
-
-    const channel = await this.getTextChannel();
-    if (!channel) {
-      this.panelMessageId = null;
-      return;
-    }
-
-    try {
-      const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
-      if (message) {
-        await message.delete().catch(() => {});
-      }
     } catch (err) {
       console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
     } finally {
