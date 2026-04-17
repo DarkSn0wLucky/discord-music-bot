@@ -44,9 +44,9 @@ function buildPlayerEmbed(player) {
     .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
     .addFields(
       { name: "Источник", value: track.source, inline: true },
-      { name: "Луп", value: loopLabel(player.loopMode), inline: true },
+      { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
       { name: "Длина очереди", value: String(player.queue.length), inline: true },
-      { name: "Прогресс", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
+      { name: "⏳TIME⏳", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
       { name: "Дальше в очереди", value: queuePreview }
     )
     .setFooter({ text: `Запросил: ${track.requestedByTag}` });

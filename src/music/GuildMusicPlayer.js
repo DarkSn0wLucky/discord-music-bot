@@ -36,6 +36,8 @@ class GuildMusicPlayer {
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
+    this.updateInterval = null;
+
     this.player.on(AudioPlayerStatus.Idle, () => {
       this.handleTrackEnd().catch((error) => {
         console.error(`[Music:${this.guild.id}] Idle handler failed`, error);
@@ -164,6 +166,9 @@ class GuildMusicPlayer {
           this.player.play(resource);
           await this.refreshPanel();
           await this.sendAction("Старт", `[${safeLinkText(next.title)}](${next.url})`);
+          
+          // ← ЗАПУСКАЕМ ЖИВОЙ ПРОГРЕСС
+          this.startProgressUpdater();
           return;
         } catch (error) {
           this.currentTrack = null;
@@ -190,6 +195,9 @@ class GuildMusicPlayer {
     const finished = this.currentTrack;
     const skipped = this.forceSkip;
     this.forceSkip = false;
+
+    // ← ОСТАНАВЛИВАЕМ ПРОГРЕСС ПРИ ЗАВЕРШЕНИИ ТРЕКА
+    this.stopProgressUpdater();
 
     if (!skipped) {
       if (this.loopMode === "track") {
@@ -249,6 +257,9 @@ class GuildMusicPlayer {
   }
 
   async stop() {
+    // ← ОСТАНАВЛИВАЕМ ПРОГРЕСС ПРИ СТОПЕ
+    this.stopProgressUpdater();
+
     const hadTracks = Boolean(this.currentTrack) || this.queue.length > 0;
     this.clearAutoDisconnect();
     this.queue = [];
@@ -398,6 +409,27 @@ class GuildMusicPlayer {
     await channel.send({
       embeds: [buildActionEmbed(title, description)],
     });
+  }
+
+  // === ЖИВОЙ ПРОГРЕСС-БАР ===
+  startProgressUpdater() {
+    this.stopProgressUpdater();
+    if (!this.currentTrack) return;
+
+    this.updateInterval = setInterval(async () => {
+      if (this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing) {
+        await this.refreshPanel().catch(() => {});
+      } else {
+        this.stopProgressUpdater();
+      }
+    }, 8000); // каждые 8 секунд (можно поставить 5000)
+  }
+
+  stopProgressUpdater() {
+    if (this.updateInterval) {
+      clearInterval(this.updateInterval);
+      this.updateInterval = null;
+    }
   }
 }
 
