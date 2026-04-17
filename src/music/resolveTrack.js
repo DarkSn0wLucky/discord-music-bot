@@ -141,29 +141,46 @@ async function resolveSoundCloudUrl(url, requestedBy) {
 }
 
 async function resolveFromSearch(query, requestedBy) {
-  const fromApi = await searchYoutubeByApi(query).catch(() => null);
-  if (fromApi) {
-    const info = await play.video_basic_info(fromApi);
+  console.log(`[Resolve] Поиск по тексту: "${query}"`);
+
+  // Вариант 1: YouTube Data API (если ключ есть — используем его)
+  if (YOUTUBE_API_KEY) {
+    const fromApi = await searchYoutubeByApi(query).catch(() => null);
+    if (fromApi) {
+      try {
+        const info = await play.video_basic_info(fromApi);
+        return {
+          tracks: [toYouTubeTrack(info.video_details, requestedBy)],
+          kind: "youtube_search_api",
+        };
+      } catch (e) {
+        console.warn("[Resolve] YouTube API не сработал, используем встроенный поиск");
+      }
+    }
+  }
+
+  // Вариант 2: Встроенный поиск play-dl (основной)
+  try {
+    const results = await play.search(query, {
+      source: { youtube: "video" },
+      limit: 3,                    // берём 3 результата, на случай если первый неудачный
+    });
+
+    if (!results || results.length === 0) {
+      throw new Error("Ничего не найдено по вашему запросу.");
+    }
+
+    // Берём первый (самый релевантный) результат
+    const video = results[0];
+
     return {
-      tracks: [toYouTubeTrack(info.video_details, requestedBy)],
-      kind: "youtube_search_api",
+      tracks: [toYouTubeTrack(video, requestedBy)],
+      kind: "youtube_search_builtin",
     };
+  } catch (error) {
+    console.error(`[Resolve] Ошибка поиска "${query}":`, error.message);
+    throw new Error(`Не удалось найти трек: ${error.message}`);
   }
-
-  const result = await play.search(query, {
-    source: { youtube: "video" },
-    limit: 1,
-  });
-
-  const first = result[0];
-  if (!first) {
-    return { tracks: [], kind: "empty" };
-  }
-
-  return {
-    tracks: [toYouTubeTrack(first, requestedBy)],
-    kind: "youtube_search_builtin",
-  };
 }
 
 async function resolveTracks(query, requestedBy) {
