@@ -267,7 +267,7 @@ class GuildMusicPlayer {
     this.forceSkip = true;
     this.player.stop(true);
     await this.disconnectFromVoice(true);
-    await this.refreshPanel();
+    await this.clearPanel();
     return hadTracks ? { ok: true, message: "Очередь очищена, бот отключён." } : { ok: false, message: "Очередь уже пуста." };
   }
 
@@ -387,8 +387,13 @@ class GuildMusicPlayer {
       }
     }
 
-    const message = await channel.send(payload);
-    this.panelMessageId = message.id;
+    // Если старого сообщения нет или оно удалено — отправляем новое
+    try {
+      const message = await channel.send(payload);
+      this.panelMessageId = message.id;
+    } catch (error) {
+      console.error(`[Panel:${this.guild.id}] Не удалось отправить панель:`, error.message);
+    }
   }
 
   async sendQueue() {
@@ -431,6 +436,27 @@ class GuildMusicPlayer {
       this.updateInterval = null;
     }
   }
+}
+
+async clearPanel() {
+  if (!this.panelMessageId) return;
+
+  const channel = await this.getTextChannel();
+  if (!channel) {
+    this.panelMessageId = null;
+    return;
+  }
+
+  try {
+    const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+    if (message) {
+      await message.delete().catch(() => {});
+    }
+  } catch (err) {
+    console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
+  } finally {
+    this.panelMessageId = null;
+   }
 }
 
 module.exports = {
