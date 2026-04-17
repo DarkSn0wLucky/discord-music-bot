@@ -1,0 +1,24 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "Minimalist pink Discord music bot with slash commands and interactive controls",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy:commands": "node scripts/deploy-commands.js",
+    "test": "echo \"No tests configured\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.26.3",
+    "dotenv": "^17.4.2",
+    "ffmpeg-static": "^5.3.0",
+    "libsodium-wrappers": "^0.8.3",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7"
+  }
+}
