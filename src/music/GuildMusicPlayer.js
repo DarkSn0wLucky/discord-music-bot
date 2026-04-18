@@ -1,4 +1,4 @@
-const {
+﻿const {
   AudioPlayerStatus,
   NoSubscriberBehavior,
   VoiceConnectionStatus,
@@ -28,6 +28,16 @@ function resolveYtDlpCookiesPath() {
     : path.resolve(process.cwd(), configuredPath);
 
   return fs.existsSync(absolutePath) ? absolutePath : null;
+}
+
+function isSourceUnavailableError(message) {
+  if (!message) {
+    return false;
+  }
+
+  return /(not available|unavailable|private video|video is unavailable|copyright|deleted|blocked|403|410|no video formats found)/i.test(
+    String(message)
+  );
 }
 
 class GuildMusicPlayer {
@@ -65,7 +75,7 @@ class GuildMusicPlayer {
 
     this.player.on("error", (error) => {
       console.error(`[Music:${this.guild.id}] Audio player error`, error);
-      this.sendAction("Ошибка плеера", `Трек пропущен: \`${error.message}\``).catch(() => null);
+      this.sendAction("РћС€РёР±РєР° РїР»РµРµСЂР°", `РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ: \`${error.message}\``).catch(() => null);
       this.forceSkip = true;
       this.player.stop(true);
     });
@@ -125,7 +135,7 @@ class GuildMusicPlayer {
             entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
           ]);
         } catch {
-          await this.disconnectFromVoice(false, "Потеряно голосовое соединение.");
+          await this.disconnectFromVoice(false, "РџРѕС‚РµСЂСЏРЅРѕ РіРѕР»РѕСЃРѕРІРѕРµ СЃРѕРµРґРёРЅРµРЅРёРµ.");
         }
       });
     }
@@ -154,7 +164,7 @@ class GuildMusicPlayer {
         this.currentTrack = { ...next, startedAt: Date.now() };
 
         try {
-          console.log(`[Play] Запуск трека: ${next.title} | ${next.url}`);
+          console.log(`[Play] Р—Р°РїСѓСЃРє С‚СЂРµРєР°: ${next.title} | ${next.url}`);
 
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
@@ -179,7 +189,7 @@ class GuildMusicPlayer {
 
           if (cookiesPath) {
             ytDlpArgs.push("--cookies", cookiesPath);
-            console.log(`[yt-dlp] Используем cookies: ${cookiesPath}`);
+            console.log(`[yt-dlp] РСЃРїРѕР»СЊР·СѓРµРј cookies: ${cookiesPath}`);
           }
 
           ytDlpArgs.push(next.url);
@@ -255,7 +265,7 @@ class GuildMusicPlayer {
               if (newState.status === AudioPlayerStatus.Idle && (ytdlpFailed || processClosed)) {
                 finishReject(
                   new Error(
-                    ytdlpErrorText.trim() || "Источник закрыл поток до начала воспроизведения"
+                    ytdlpErrorText.trim() || "РСЃС‚РѕС‡РЅРёРє Р·Р°РєСЂС‹Р» РїРѕС‚РѕРє РґРѕ РЅР°С‡Р°Р»Р° РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёСЏ"
                   )
                 );
               }
@@ -270,7 +280,7 @@ class GuildMusicPlayer {
               if (ytdlpFailed || processClosed) {
                 finishReject(
                   new Error(
-                    ytdlpErrorText.trim() || "Не удалось дождаться стабильного запуска потока"
+                    ytdlpErrorText.trim() || "РќРµ СѓРґР°Р»РѕСЃСЊ РґРѕР¶РґР°С‚СЊСЃСЏ СЃС‚Р°Р±РёР»СЊРЅРѕРіРѕ Р·Р°РїСѓСЃРєР° РїРѕС‚РѕРєР°"
                   )
                 );
                 return;
@@ -282,6 +292,11 @@ class GuildMusicPlayer {
             this.player.on("stateChange", onStateChange);
           });
 
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          if (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed) {
+            throw new Error(ytdlpErrorText.trim() || "Source stream closed before stable start");
+          }
+
           await this.refreshPanel();
           await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
           this.startProgressUpdater();
@@ -290,10 +305,20 @@ class GuildMusicPlayer {
           console.error(`[Play Error] ${next.title}: ${error.message}`);
           this.currentTrack = null;
 
-          await this.sendAction(
-            "Трек пропущен",
-            `**${safeLinkText(next.title)}**\n\`${error.message}\``
-          );
+          if (Array.isArray(next.fallbackTracks) && next.fallbackTracks.length > 0) {
+            const [fallbackTrack, ...restFallbacks] = next.fallbackTracks;
+            fallbackTrack.fallbackTracks = restFallbacks;
+            this.queue.unshift(fallbackTrack);
+
+            await this.sendAction(
+              "Источник недоступен",
+              `**${safeLinkText(next.title)}** недоступен, пробую запасной вариант по запросу.`
+            );
+            continue;
+          }
+
+          const actionTitle = isSourceUnavailableError(error.message) ? "Трек недоступен" : "Трек пропущен";
+          await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${error.message}\``);
         }
       }
 
@@ -333,52 +358,52 @@ class GuildMusicPlayer {
 
   async togglePause() {
     if (!this.currentTrack) {
-      return { ok: false, message: "Сейчас нет активного трека." };
+      return { ok: false, message: "РЎРµР№С‡Р°СЃ РЅРµС‚ Р°РєС‚РёРІРЅРѕРіРѕ С‚СЂРµРєР°." };
     }
 
     if (this.isPaused()) {
       const resumed = this.player.unpause();
       await this.refreshPanel();
       return resumed
-        ? { ok: true, message: "Продолжаю воспроизведение." }
-        : { ok: false, message: "Не удалось продолжить." };
+        ? { ok: true, message: "РџСЂРѕРґРѕР»Р¶Р°СЋ РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёРµ." }
+        : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕРґРѕР»Р¶РёС‚СЊ." };
     }
 
     const paused = this.player.pause(true);
     await this.refreshPanel();
     return paused
-      ? { ok: true, message: "Поставлено на паузу." }
-      : { ok: false, message: "Не удалось поставить на паузу." };
+      ? { ok: true, message: "РџРѕСЃС‚Р°РІР»РµРЅРѕ РЅР° РїР°СѓР·Сѓ." }
+      : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕСЃС‚Р°РІРёС‚СЊ РЅР° РїР°СѓР·Сѓ." };
   }
 
   async pause() {
     if (!this.currentTrack) {
-      return { ok: false, message: "Сейчас нет активного трека." };
+      return { ok: false, message: "РЎРµР№С‡Р°СЃ РЅРµС‚ Р°РєС‚РёРІРЅРѕРіРѕ С‚СЂРµРєР°." };
     }
 
     const paused = this.player.pause(true);
     await this.refreshPanel();
     return paused
-      ? { ok: true, message: "Пауза." }
-      : { ok: false, message: "Не удалось поставить на паузу." };
+      ? { ok: true, message: "РџР°СѓР·Р°." }
+      : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕСЃС‚Р°РІРёС‚СЊ РЅР° РїР°СѓР·Сѓ." };
   }
 
   async resume() {
     const resumed = this.player.unpause();
     await this.refreshPanel();
     return resumed
-      ? { ok: true, message: "Продолжаю." }
-      : { ok: false, message: "Не удалось продолжить." };
+      ? { ok: true, message: "РџСЂРѕРґРѕР»Р¶Р°СЋ." }
+      : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕРґРѕР»Р¶РёС‚СЊ." };
   }
 
   async skip() {
     if (!this.currentTrack) {
-      return { ok: false, message: "Сейчас нечего скипать." };
+      return { ok: false, message: "РЎРµР№С‡Р°СЃ РЅРµС‡РµРіРѕ СЃРєРёРїР°С‚СЊ." };
     }
 
     this.forceSkip = true;
     this.player.stop(true);
-    return { ok: true, message: "Трек пропущен." };
+    return { ok: true, message: "РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ." };
   }
 
   async stop() {
@@ -395,13 +420,13 @@ class GuildMusicPlayer {
     await this.clearPanel();
 
     return hadTracks
-      ? { ok: true, message: "Очередь очищена, бот отключён." }
-      : { ok: false, message: "Очередь уже пуста." };
+      ? { ok: true, message: "РћС‡РµСЂРµРґСЊ РѕС‡РёС‰РµРЅР°, Р±РѕС‚ РѕС‚РєР»СЋС‡С‘РЅ." }
+      : { ok: false, message: "РћС‡РµСЂРµРґСЊ СѓР¶Рµ РїСѓСЃС‚Р°." };
   }
 
   async shuffle() {
     if (this.queue.length < 2) {
-      return { ok: false, message: "Для шафла нужно минимум 2 трека в очереди." };
+      return { ok: false, message: "Р”Р»СЏ С€Р°С„Р»Р° РЅСѓР¶РЅРѕ РјРёРЅРёРјСѓРј 2 С‚СЂРµРєР° РІ РѕС‡РµСЂРµРґРё." };
     }
 
     for (let i = this.queue.length - 1; i > 0; i -= 1) {
@@ -410,7 +435,7 @@ class GuildMusicPlayer {
     }
 
     await this.refreshPanel();
-    return { ok: true, message: "Очередь перемешана." };
+    return { ok: true, message: "РћС‡РµСЂРµРґСЊ РїРµСЂРµРјРµС€Р°РЅР°." };
   }
 
   async cycleLoopMode() {
@@ -429,9 +454,9 @@ class GuildMusicPlayer {
     return true;
   }
 
-  async disconnectFromVoice(sendNotice = false, reason = "Отключаюсь.") {
+  async disconnectFromVoice(sendNotice = false, reason = "РћС‚РєР»СЋС‡Р°СЋСЃСЊ.") {
     if (sendNotice) {
-      await this.sendAction("Стоп", reason);
+      await this.sendAction("РЎС‚РѕРї", reason);
     }
 
     if (this.connection) {
@@ -451,7 +476,7 @@ class GuildMusicPlayer {
 
       if (this.currentTrack || this.queue.length > 0 || !this.connection) return;
 
-      await this.disconnectFromVoice(true, "Пустая очередь более 3 минут.");
+      await this.disconnectFromVoice(true, "РџСѓСЃС‚Р°СЏ РѕС‡РµСЂРµРґСЊ Р±РѕР»РµРµ 3 РјРёРЅСѓС‚.");
       await this.refreshPanel();
     }, AUTO_DISCONNECT_MS);
   }
@@ -499,7 +524,7 @@ class GuildMusicPlayer {
       const message = await channel.send(payload);
       this.panelMessageId = message.id;
     } catch (error) {
-      console.error(`[Panel:${this.guild.id}] Не удалось отправить панель:`, error.message);
+      console.error(`[Panel:${this.guild.id}] РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ РїР°РЅРµР»СЊ:`, error.message);
     }
   }
 
@@ -560,3 +585,4 @@ class GuildMusicPlayer {
 module.exports = {
   GuildMusicPlayer,
 };
+

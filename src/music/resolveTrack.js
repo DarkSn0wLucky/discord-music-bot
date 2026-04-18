@@ -1,4 +1,4 @@
-const play = require("play-dl");
+﻿const play = require("play-dl");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -40,8 +40,7 @@ async function probeYtDlp(url) {
 
   const probe = await new Promise((resolve) => {
     const args = [
-      "--simulate",
-      "--skip-download",
+      "-g",
       "--no-playlist",
       "--no-warnings",
       "--quiet",
@@ -52,6 +51,7 @@ async function probeYtDlp(url) {
       "--extractor-args",
       "youtube:player_client=android,ios,tv",
     ];
+
     const cookiesPath = resolveYtDlpCookiesPath();
     if (cookiesPath) {
       args.push("--cookies", cookiesPath);
@@ -59,6 +59,7 @@ async function probeYtDlp(url) {
 
     args.push(url);
 
+    let stdout = "";
     let stderr = "";
     let done = false;
 
@@ -71,13 +72,17 @@ async function probeYtDlp(url) {
     };
 
     const process = spawn("yt-dlp", args, {
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
 
     const timeout = setTimeout(() => {
       process.kill("SIGKILL");
       finish({ ok: false, reason: "timeout" });
     }, 12_000);
+
+    process.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
 
     process.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -87,7 +92,6 @@ async function probeYtDlp(url) {
       clearTimeout(timeout);
 
       if (error.code === "ENOENT") {
-        // If yt-dlp is not available in this environment, don't block resolver.
         finish({ ok: true, reason: "yt-dlp-missing" });
         return;
       }
@@ -97,20 +101,33 @@ async function probeYtDlp(url) {
 
     process.on("close", (code) => {
       clearTimeout(timeout);
-      if (code === 0) {
+      const output = stdout.trim();
+
+      if (code === 0 && output) {
         finish({ ok: true, reason: "ok" });
         return;
       }
 
       finish({
         ok: false,
-        reason: stderr.trim() || `yt-dlp exit code ${code}`,
+        reason: stderr.trim() || output || `yt-dlp exit code ${code}`,
       });
     });
   });
 
   ytDlpProbeCache.set(url, probe);
   return probe;
+}
+
+function mergeUniqueCandidateUrls(items, seenUrls, out) {
+  for (const url of items) {
+    if (!url || seenUrls.has(url)) {
+      continue;
+    }
+
+    seenUrls.add(url);
+    out.push(url);
+  }
 }
 
 function youtubeThumb(video) {
@@ -129,7 +146,7 @@ function toYouTubeTrack(video, requestedBy) {
   const durationSec = Number(video.durationInSec) || 0;
 
   return {
-    title: video.title || "Без названия",
+    title: video.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: video.url,
     source: "YouTube",
     author: video.channel?.name || video.channel?.title || "YouTube",
@@ -146,7 +163,7 @@ function toSoundCloudTrack(track, requestedBy) {
   const durationMs = Number(track.durationInMs) || (durationSec > 0 ? durationSec * 1000 : 0);
 
   return {
-    title: track.name || "Без названия",
+    title: track.name || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: track.permalink || track.url,
     source: "SoundCloud",
     author: track.user?.name || "SoundCloud",
@@ -213,7 +230,7 @@ async function resolveYoutubeUrl(url, requestedBy) {
       title: playlist.title || "YouTube playlist",
     };
   } catch (error) {
-    throw new Error(`Не удалось открыть YouTube плейлист: ${error.message}`);
+    throw new Error(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ YouTube РїР»РµР№Р»РёСЃС‚: ${error.message}`);
   }
 }
 
@@ -245,7 +262,7 @@ async function resolveSoundCloudUrl(url, requestedBy) {
 async function resolveCandidateVideo(url, requestedBy) {
   const info = await play.video_basic_info(url);
   if (!info?.video_details?.url) {
-    throw new Error("Пустой ответ от YouTube");
+    throw new Error("РџСѓСЃС‚РѕР№ РѕС‚РІРµС‚ РѕС‚ YouTube");
   }
 
   return {
@@ -257,59 +274,62 @@ async function resolveCandidateVideo(url, requestedBy) {
 async function resolveFromSearch(query, requestedBy) {
   console.log(`[Resolve] Поиск по тексту: "${query}"`);
 
+  const candidateUrls = [];
+  const seenUrls = new Set();
+
   if (YOUTUBE_API_KEY) {
     const apiUrls = await searchYoutubeByApi(query).catch(() => null);
-
     if (Array.isArray(apiUrls) && apiUrls.length > 0) {
-      for (const url of apiUrls) {
-        try {
-          const probe = await probeYtDlp(url);
-          if (!probe.ok) {
-            console.warn(`[Resolve] API-кандидат не воспроизводится: ${url} | ${probe.reason}`);
-            continue;
-          }
-
-          const resolved = await resolveCandidateVideo(url, requestedBy);
-          console.log(`[Resolve] YouTube API выбрал: ${url}`);
-          return {
-            ...resolved,
-            kind: "youtube_search_api",
-          };
-        } catch (error) {
-          console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
-        }
-      }
-
-      console.warn("[Resolve] YouTube API не дал доступных видео, пробуем встроенный поиск");
+      mergeUniqueCandidateUrls(apiUrls, seenUrls, candidateUrls);
     }
   }
 
   try {
     const results = await play.search(query, {
       source: { youtube: "video" },
-      limit: 10,
+      limit: 15,
     });
 
     if (!results || results.length === 0) {
       throw new Error("Ничего не найдено по вашему запросу.");
     }
 
-    for (const video of results) {
-      if (!video?.url) continue;
+    mergeUniqueCandidateUrls(
+      results.map((video) => video?.url).filter(Boolean),
+      seenUrls,
+      candidateUrls
+    );
 
+    const playableTracks = [];
+    for (const url of candidateUrls) {
       try {
-        console.log(`[Resolve] Проверка кандидата: ${video.title} | ${video.url}`);
-        const probe = await probeYtDlp(video.url);
+        const probe = await probeYtDlp(url);
         if (!probe.ok) {
-          console.warn(`[Resolve] Кандидат не воспроизводится: ${video.url} | ${probe.reason}`);
+          console.warn(`[Resolve] Кандидат не воспроизводится: ${url} | ${probe.reason}`);
           continue;
         }
 
-        const resolved = await resolveCandidateVideo(video.url, requestedBy);
-        return resolved;
+        const resolved = await resolveCandidateVideo(url, requestedBy);
+        playableTracks.push(resolved.tracks[0]);
+
+        if (playableTracks.length >= 4) {
+          break;
+        }
       } catch (error) {
-        console.warn(`[Resolve] Кандидат пропущен: ${video.url} | ${error.message}`);
+        console.warn(`[Resolve] Кандидат пропущен: ${url} | ${error.message}`);
       }
+    }
+
+    if (playableTracks.length > 0) {
+      const [first, ...fallbackTracks] = playableTracks;
+      first.searchQuery = query;
+      first.fallbackTracks = fallbackTracks;
+
+      console.log(`[Resolve] Выбран кандидат: ${first.url}; запасных: ${fallbackTracks.length}`);
+      return {
+        tracks: [first],
+        kind: "youtube_search",
+      };
     }
 
     throw new Error("Не удалось подобрать доступный трек по запросу.");
@@ -337,7 +357,7 @@ async function resolveTracks(query, requestedBy) {
       return soundCloudResolved;
     }
 
-    throw new Error("Эта ссылка пока не поддерживается. Используй YouTube/SoundCloud.");
+    throw new Error("Р­С‚Р° СЃСЃС‹Р»РєР° РїРѕРєР° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ. РСЃРїРѕР»СЊР·СѓР№ YouTube/SoundCloud.");
   }
 
   return resolveFromSearch(input, requestedBy);
@@ -346,3 +366,4 @@ async function resolveTracks(query, requestedBy) {
 module.exports = {
   resolveTracks,
 };
+

@@ -1,6 +1,9 @@
+const { MessageFlags } = require("discord.js");
 const { resolveTracks } = require("../music/resolveTrack");
 const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
+
+const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 
 function isSameVoiceWithBot(interaction, player) {
   const memberVoiceId = interaction.member?.voice?.channelId;
@@ -22,7 +25,7 @@ function isSameVoiceWithBot(interaction, player) {
 async function withPlayer(interaction, manager) {
   const player = manager.get(interaction.guild.id);
   if (!player) {
-    await interaction.reply({ content: "Плеер ещё не запущен. Используй `/play`.", ephemeral: true });
+    await interaction.reply({ content: "Плеер ещё не запущен. Используй `/play`.", ...EPHEMERAL_REPLY });
     return null;
   }
 
@@ -33,7 +36,7 @@ async function withPlayer(interaction, manager) {
 async function handlePlay(interaction, manager) {
   const memberVoice = interaction.member?.voice?.channel;
   if (!memberVoice) {
-    await interaction.reply({ content: "Зайди в голосовой канал и повтори `/play`.", ephemeral: true });
+    await interaction.reply({ content: "Зайди в голосовой канал и повтори `/play`.", ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -41,7 +44,7 @@ async function handlePlay(interaction, manager) {
   if (botVoiceId && botVoiceId !== memberVoice.id) {
     await interaction.reply({
       content: "Я уже в другом голосовом канале. Зайди туда или останови плеер через `/stop`.",
-      ephemeral: true,
+      ...EPHEMERAL_REPLY,
     });
     return;
   }
@@ -94,7 +97,7 @@ async function handleSkip(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -110,7 +113,7 @@ async function handlePause(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -126,7 +129,7 @@ async function handleResume(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -142,7 +145,7 @@ async function handleStop(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -178,7 +181,7 @@ async function handleShuffle(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -201,7 +204,7 @@ async function handleLoop(interaction, manager) {
   const mode = interaction.options.getString("mode", true);
   const updated = await player.setLoopMode(mode);
   if (!updated) {
-    await interaction.reply({ content: "Некорректный режим loop.", ephemeral: true });
+    await interaction.reply({ content: "Некорректный режим loop.", ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -211,13 +214,13 @@ async function handleLoop(interaction, manager) {
 async function handleButton(interaction, manager) {
   const player = manager.get(interaction.guild.id);
   if (!player) {
-    await interaction.reply({ content: "Плеер неактивен.", ephemeral: true });
+    await interaction.reply({ content: "Плеер неактивен.", ...EPHEMERAL_REPLY });
     return;
   }
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -226,7 +229,7 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.toggle) {
     const result = await player.togglePause();
     if (!result.ok) {
-      await interaction.followUp({ content: result.message, ephemeral: true });
+      await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
     }
     return;
   }
@@ -234,7 +237,7 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.skip) {
     const result = await player.skip();
     if (!result.ok) {
-      await interaction.followUp({ content: result.message, ephemeral: true });
+      await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
     }
     return;
   }
@@ -242,7 +245,7 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.stop) {
     const result = await player.stop();
     if (!result.ok) {
-      await interaction.followUp({ content: result.message, ephemeral: true });
+      await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
     }
     return;
   }
@@ -250,7 +253,7 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.shuffle) {
     const result = await player.shuffle();
     if (!result.ok) {
-      await interaction.followUp({ content: result.message, ephemeral: true });
+      await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
     }
     return;
   }
@@ -260,7 +263,7 @@ async function handleButton(interaction, manager) {
     return;
   }
 
-  await interaction.followUp({ content: "Неизвестная кнопка.", ephemeral: true });
+  await interaction.followUp({ content: "Неизвестная кнопка.", ...EPHEMERAL_REPLY });
 }
 
 async function handleChatInput(interaction, manager) {

@@ -20,7 +20,7 @@ const client = new Client({
 
 const manager = new MusicManager(client);
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`[Bot] Logged in as ${client.user.tag}`);
   try {
     const sourceStatus = await initSourceAuth();
@@ -56,4 +56,3 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(DISCORD_TOKEN);
-
