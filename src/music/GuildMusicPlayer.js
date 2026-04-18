@@ -48,6 +48,8 @@ class GuildMusicPlayer {
     this.currentTrack = null;
     this.loopMode = "off";
     this.forceSkip = false;
+    this.suppressNextTrackAction = false;
+    this.preservePanelOnNextTrack = false;
     this.transitionLock = false;
     this.textChannelId = null;
     this.panelMessageId = null;
@@ -153,7 +155,8 @@ class GuildMusicPlayer {
     return true;
   }
 
-  async playNext() {
+  async playNext(options = {}) {
+    const { suppressTrackAction = false, preservePanelMessage = false } = options;
     if (this.transitionLock) return;
 
     this.transitionLock = true;
@@ -302,9 +305,13 @@ class GuildMusicPlayer {
             this.currentTrack.startedAt = Date.now();
           }
 
-          await this.clearPanel();
+          if (!preservePanelMessage) {
+            await this.clearPanel();
+          }
           await this.refreshPanel();
-          await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
+          if (!suppressTrackAction) {
+            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
+          }
           this.startProgressUpdater();
           return;
         } catch (error) {
@@ -346,7 +353,11 @@ class GuildMusicPlayer {
 
     const finished = this.currentTrack;
     const skipped = this.forceSkip;
+    const suppressTrackAction = this.suppressNextTrackAction;
+    const preservePanelMessage = this.preservePanelOnNextTrack;
     this.forceSkip = false;
+    this.suppressNextTrackAction = false;
+    this.preservePanelOnNextTrack = false;
 
     this.stopProgressUpdater();
 
@@ -359,7 +370,10 @@ class GuildMusicPlayer {
     }
 
     this.currentTrack = null;
-    await this.playNext();
+    await this.playNext({
+      suppressTrackAction,
+      preservePanelMessage,
+    });
   }
 
   async togglePause() {
@@ -407,6 +421,8 @@ class GuildMusicPlayer {
       return { ok: false, message: "РЎРµР№С‡Р°СЃ РЅРµС‡РµРіРѕ СЃРєРёРїР°С‚СЊ." };
     }
 
+    this.suppressNextTrackAction = true;
+    this.preservePanelOnNextTrack = true;
     this.forceSkip = true;
     this.player.stop(true);
     return { ok: true, message: "РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ." };
@@ -420,6 +436,8 @@ class GuildMusicPlayer {
     this.queue = [];
     this.currentTrack = null;
     this.forceSkip = true;
+    this.suppressNextTrackAction = false;
+    this.preservePanelOnNextTrack = false;
     this.player.stop(true);
 
     await this.disconnectFromVoice(false);

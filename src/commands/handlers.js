@@ -177,8 +177,14 @@ async function handleSkip(interaction, manager) {
     return;
   }
 
+  await interaction.deferReply({ ...EPHEMERAL_REPLY });
   const result = await player.skip();
-  await interaction.reply({ content: result.message });
+  if (result.ok) {
+    await interaction.deleteReply().catch(() => null);
+    return;
+  }
+
+  await interaction.editReply(result.message);
 }
 
 async function handlePause(interaction, manager) {
