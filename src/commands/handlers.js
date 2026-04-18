@@ -116,7 +116,7 @@ async function handlePlay(interaction, manager) {
     return;
   }
 
-  await interaction.deferReply({ ...EPHEMERAL_REPLY });
+  await interaction.deferReply();
 
   try {
     const query = interaction.options.getString("query", true);
