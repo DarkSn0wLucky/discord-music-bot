@@ -1,3 +1,6 @@
+const http = require("http");
+const https = require("https");
+const { execFile } = require("child_process");
 const play = require("play-dl");
 const {
   MAX_PLAYLIST_ITEMS,
@@ -129,6 +132,56 @@ function extractTitleTag(html) {
   }
 
   return decodeHtmlEntities(match[1]);
+}
+
+function isYandexMusicHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return host === "music.yandex.ru" || host.startsWith("music.yandex.");
+}
+
+function parseYandexUrlInfo(url) {
+  try {
+    const parsed = new URL(url);
+    if (!isYandexMusicHost(parsed.hostname)) {
+      return null;
+    }
+
+    const pathName = parsed.pathname || "";
+    const trackInAlbum = pathName.match(/\/album\/(\d+)\/track\/(\d+)/i);
+    if (trackInAlbum) {
+      return {
+        origin: parsed.origin,
+        albumId: trackInAlbum[1],
+        trackId: trackInAlbum[2],
+      };
+    }
+
+    const directTrack = pathName.match(/\/track\/(\d+)/i);
+    if (directTrack) {
+      return {
+        origin: parsed.origin,
+        albumId: parsed.searchParams.get("album") || parsed.searchParams.get("albumId") || "",
+        trackId: directTrack[1],
+      };
+    }
+
+    const album = pathName.match(/\/album\/(\d+)/i);
+    if (album) {
+      return {
+        origin: parsed.origin,
+        albumId: album[1],
+        trackId: "",
+      };
+    }
+
+    return {
+      origin: parsed.origin,
+      albumId: "",
+      trackId: "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function isUrl(value) {
@@ -538,6 +591,232 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
   return resolvedTracks;
 }
 
+function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
+  const maxRedirects = 4;
+  const timeoutMs = Number(options.timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS;
+  const headers = options.headers || {};
+
+  return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const client = parsedUrl.protocol === "http:" ? http : https;
+    const req = client.request(
+      parsedUrl,
+      {
+        method: "GET",
+        headers,
+      },
+      (res) => {
+        const statusCode = Number(res.statusCode) || 0;
+        const location = String(res.headers.location || "");
+        if (location && statusCode >= 300 && statusCode < 400 && redirectCount < maxRedirects) {
+          const nextUrl = new URL(location, parsedUrl).toString();
+          res.resume();
+          requestTextWithRedirect(nextUrl, options, redirectCount + 1).then(resolve).catch(reject);
+          return;
+        }
+
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            statusCode,
+            body,
+            finalUrl: parsedUrl.toString(),
+            headers: res.headers,
+          });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error("Request timeout"));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function fetchJsonViaCurl(url) {
+  return new Promise((resolve) => {
+    const maxTimeSec = Math.max(4, Math.ceil(EXTERNAL_FETCH_TIMEOUT_MS / 1000));
+    const args = [
+      "-sS",
+      "-L",
+      "--max-time",
+      String(maxTimeSec),
+      "-A",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      "-H",
+      "accept: application/json,text/plain,*/*",
+      "-H",
+      "accept-language: ru,en-US;q=0.9,en;q=0.8",
+      "-H",
+      "referer: https://music.yandex.ru/",
+      String(url),
+    ];
+
+    execFile(
+      "curl",
+      args,
+      {
+        timeout: EXTERNAL_FETCH_TIMEOUT_MS + 2_000,
+        windowsHide: true,
+        maxBuffer: 3 * 1024 * 1024,
+      },
+      (error, stdout) => {
+        if (error || !stdout) {
+          resolve(null);
+          return;
+        }
+
+        const text = String(stdout).trim();
+        if (!text || (text[0] !== "{" && text[0] !== "[")) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          resolve(JSON.parse(text));
+        } catch {
+          resolve(null);
+        }
+      }
+    );
+  });
+}
+
+async function fetchJsonWithTimeout(url) {
+  try {
+    const curlJson = await fetchJsonViaCurl(url);
+    if (curlJson) {
+      return curlJson;
+    }
+
+    const response = await requestTextWithRedirect(url, {
+      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        accept: "application/json,text/plain,*/*",
+        "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+        referer: "https://music.yandex.ru/",
+      },
+    });
+
+    if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+
+    const text = String(response.body || "").trim();
+    if (!text || (text[0] !== "{" && text[0] !== "[")) {
+      return null;
+    }
+
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function resolveYandexUrl(url, requestedBy) {
+  const info = parseYandexUrlInfo(url);
+  if (!info) {
+    return null;
+  }
+
+  if (info.trackId) {
+    const trackParam = info.albumId ? `${info.trackId}:${info.albumId}` : info.trackId;
+    const trackUrl = new URL("/handlers/track.jsx", info.origin);
+    trackUrl.searchParams.set("track", trackParam);
+
+    const trackData = await fetchJsonWithTimeout(trackUrl.toString());
+    const trackMeta = trackData?.track || trackData?.result?.track || null;
+
+    if (trackMeta?.title) {
+      const artist = joinArtists(trackMeta.artists);
+      const query = buildQueryFromArtistTitle(artist, trackMeta.title);
+      const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy);
+      if (resolvedTrack) {
+        return {
+          tracks: [resolvedTrack],
+          kind: "yandex_track",
+          title: trackMeta.title || "Yandex track",
+        };
+      }
+    }
+  }
+
+  if (info.albumId) {
+    const albumUrl = new URL("/handlers/album.jsx", info.origin);
+    albumUrl.searchParams.set("album", info.albumId);
+
+    const albumData = await fetchJsonWithTimeout(albumUrl.toString());
+    const volumes = Array.isArray(albumData?.volumes) ? albumData.volumes : [];
+    if (info.trackId) {
+      let exactTrack = null;
+
+      for (const volume of volumes) {
+        const tracks = Array.isArray(volume) ? volume : [];
+        for (const track of tracks) {
+          const currentTrackId = String(track?.id || track?.realId || "");
+          if (currentTrackId && currentTrackId === String(info.trackId)) {
+            exactTrack = track;
+            break;
+          }
+        }
+
+        if (exactTrack) {
+          break;
+        }
+      }
+
+      if (exactTrack?.title) {
+        const query = buildQueryFromArtistTitle(joinArtists(exactTrack.artists), exactTrack.title);
+        const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy);
+        if (resolvedTrack) {
+          return {
+            tracks: [resolvedTrack],
+            kind: "yandex_track",
+            title: exactTrack.title || "Yandex track",
+          };
+        }
+      }
+
+      return null;
+    }
+
+    const metadata = [];
+    for (const volume of volumes) {
+      const tracks = Array.isArray(volume) ? volume : [];
+      for (const track of tracks) {
+        metadata.push({
+          title: track?.title || "",
+          artist: joinArtists(track?.artists),
+        });
+      }
+    }
+
+    const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+    if (resolvedTracks.length > 0) {
+      return {
+        tracks: resolvedTracks,
+        kind: "yandex_album",
+        title: albumData?.title || "Yandex album",
+      };
+    }
+  }
+
+  return null;
+}
+
 async function resolveSpotifyUrl(url, requestedBy) {
   if (!HAS_SPOTIFY_AUTH) {
     return null;
@@ -881,6 +1160,19 @@ async function resolveTracks(query, requestedBy) {
     const soundCloudResolved = await resolveSoundCloudUrl(input, requestedBy);
     if (soundCloudResolved) {
       return soundCloudResolved;
+    }
+
+    const yandexInfo = parseYandexUrlInfo(input);
+    if (yandexInfo) {
+      const yandexResolved = await resolveYandexUrl(input, requestedBy).catch((error) => {
+        console.warn(`[Resolve] Yandex URL fallback (${input}): ${error.message}`);
+        return null;
+      });
+      if (yandexResolved) {
+        return yandexResolved;
+      }
+
+      throw new Error("Не удалось получить метаданные из ссылки Яндекс Музыки (возможно, временная капча/ограничение).");
     }
 
     const spotifyResolved = await resolveSpotifyUrl(input, requestedBy).catch((error) => {
