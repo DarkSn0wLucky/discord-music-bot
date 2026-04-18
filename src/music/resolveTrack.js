@@ -298,7 +298,6 @@ function scoreCandidate(track, queryMeta) {
   const viewsWeight = tokenCount <= 2 ? 13 : tokenCount <= 4 ? 11 : 8;
   const hasArtistInTitle = /[-–—]/u.test(String(track?.title || ""));
   const exactTitleMatch = normalizedTitle === queryMeta.normalizedQuery;
-  const shortQuery = tokenCount <= 2;
   const titleTokenCount = normalizedTitle ? normalizedTitle.split(" ").length : 0;
   const isTopicChannel = /- topic$/iu.test(String(track?.author || ""));
   let score = 0;
@@ -321,17 +320,17 @@ function scoreCandidate(track, queryMeta) {
   score += hasArtistInTitle ? 6 : 0;
   score -= exactTitleMatch ? 14 : 0;
 
-  if (shortQuery && hasArtistInTitle) {
-    score += 14;
+  if (hasArtistInTitle) {
+    score += 8;
   }
-  if (shortQuery && exactTitleMatch && !hasArtistInTitle) {
-    score -= 36;
+  if (exactTitleMatch && !hasArtistInTitle) {
+    score -= 20;
   }
-  if (shortQuery && titleTokenCount > 8) {
+  if (titleTokenCount > Math.max(10, queryMeta.tokens.length * 6)) {
     score -= 10;
   }
   if (isTopicChannel) {
-    score -= 18;
+    score -= 10;
   }
 
   const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("концерт");
