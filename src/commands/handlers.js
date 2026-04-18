@@ -150,7 +150,14 @@ async function handleStop(interaction, manager) {
   }
 
   const result = await player.stop();
-  await interaction.reply({ content: result.message });
+  // For successful stop, avoid extra ephemeral/public ack message.
+  if (result.ok) {
+    await interaction.deferReply({ ...EPHEMERAL_REPLY });
+    await interaction.deleteReply().catch(() => null);
+    return;
+  }
+
+  await interaction.reply({ content: result.message, ...EPHEMERAL_REPLY });
 }
 
 async function handleQueue(interaction, manager) {
@@ -243,10 +250,7 @@ async function handleButton(interaction, manager) {
   }
 
   if (interaction.customId === BUTTON_IDS.stop) {
-    const result = await player.stop();
-    if (!result.ok) {
-      await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
-    }
+    await player.stop();
     return;
   }
 
