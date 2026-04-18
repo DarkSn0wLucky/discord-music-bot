@@ -172,6 +172,9 @@ class GuildMusicPlayer {
             "--buffer-size",
             "128K",
             "--geo-bypass",
+            "--force-ipv4",
+            "--extractor-args",
+            "youtube:player_client=android,ios,tv",
           ];
 
           if (cookiesPath) {

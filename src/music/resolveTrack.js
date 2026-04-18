@@ -39,7 +39,19 @@ async function probeYtDlp(url) {
   }
 
   const probe = await new Promise((resolve) => {
-    const args = ["--simulate", "--skip-download", "--no-playlist", "--no-warnings", "--quiet", "--geo-bypass"];
+    const args = [
+      "--simulate",
+      "--skip-download",
+      "--no-playlist",
+      "--no-warnings",
+      "--quiet",
+      "--geo-bypass",
+      "--force-ipv4",
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio/best",
+      "--extractor-args",
+      "youtube:player_client=android,ios,tv",
+    ];
     const cookiesPath = resolveYtDlpCookiesPath();
     if (cookiesPath) {
       args.push("--cookies", cookiesPath);
