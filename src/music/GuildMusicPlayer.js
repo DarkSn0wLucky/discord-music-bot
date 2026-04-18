@@ -325,7 +325,8 @@ class GuildMusicPlayer {
 
             await this.sendAction(
               "Источник недоступен",
-              `**${safeLinkText(next.title)}** недоступен, пробую запасной вариант по запросу.`
+              `**${safeLinkText(next.title)}** недоступен, пробую запасной вариант по запросу.`,
+              { autoDeleteMs: 10_000 }
             );
             continue;
           }
@@ -570,10 +571,16 @@ class GuildMusicPlayer {
     await channel.send({ embeds: [buildQueueEmbed(this)] });
   }
 
-  async sendAction(title, description) {
+  async sendAction(title, description, options = {}) {
     const channel = await this.getTextChannel();
     if (!channel) return;
-    await channel.send({ embeds: [buildActionEmbed(title, description)] });
+    const message = await channel.send({ embeds: [buildActionEmbed(title, description)] });
+    const autoDeleteMs = Number(options.autoDeleteMs);
+    if (Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
+      setTimeout(() => {
+        message.delete().catch(() => {});
+      }, autoDeleteMs);
+    }
   }
 
   startProgressUpdater() {
