@@ -4,6 +4,7 @@ const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY } = require("../config");
 const SEARCH_RESULTS_LIMIT = 8;
 const SEARCH_TRACK_PACK_SIZE = 4;
 const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
+const API_RESOLVE_LIMIT = 12;
 
 const QUERY_STOPWORDS = new Set([
   "official",
@@ -62,6 +63,13 @@ function normalizeText(value) {
     .replace(/ё/g, "е")
     .normalize("NFKC")
     .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function canonicalTitle(value) {
+  return normalizeText(value)
+    .replace(/\b(official|video|audio|lyrics|lyric|mv|hd|hq)\b/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -185,6 +193,31 @@ function dedupeTracksByUrl(tracks, limit = Number.POSITIVE_INFINITY) {
   return unique;
 }
 
+function dedupeTracksByIdentity(tracks, limit = Number.POSITIVE_INFINITY) {
+  const seenKeys = new Set();
+  const unique = [];
+
+  for (const track of tracks) {
+    if (!track?.url) {
+      continue;
+    }
+
+    const key = `${canonicalTitle(track.title)}|${normalizeText(track.author)}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    seenKeys.add(key);
+    unique.push(track);
+
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+
+  return unique;
+}
+
 function buildQueryMeta(query) {
   const normalizedQuery = normalizeText(query);
   const rawTokens = normalizedQuery.split(" ").filter(Boolean);
@@ -232,6 +265,7 @@ function strictCoverageThreshold(tokenCount) {
 
 function scoreCandidate(track, queryMeta) {
   const haystack = `${track?.title || ""} ${track?.author || ""}`;
+  const normalizedTitle = normalizeText(track?.title || "");
   const normalizedHaystack = normalizeText(haystack);
   const haystackTokens = normalizedHaystack.split(" ").filter(Boolean);
   const haystackTokenSet = new Set(haystackTokens);
@@ -260,23 +294,29 @@ function scoreCandidate(track, queryMeta) {
 
   const views = Number(track?.views) || 0;
   const durationSec = Number(track?.durationSec) || 0;
+  const tokenCount = queryMeta.tokens.length || 1;
+  const viewsWeight = tokenCount <= 2 ? 18 : tokenCount <= 4 ? 12 : 8;
+  const hasArtistInTitle = /[-–—]/u.test(String(track?.title || ""));
+  const exactTitleMatch = normalizedTitle === queryMeta.normalizedQuery;
   let score = 0;
 
-  score += tokenCoverage * 120;
-  score += matchCount * 14;
+  score += tokenCoverage * 95;
+  score += matchCount * 10;
 
   if (containsFullQuery) {
-    score += 70;
+    score += 42;
   }
   if (startsWithQuery) {
-    score += 25;
+    score += 10;
   }
   if (orderedPhraseMatch) {
-    score += 18;
+    score += 10;
   }
 
-  score += views > 0 ? Math.log10(views + 1) * 5 : 0;
+  score += views > 0 ? Math.log10(views + 1) * viewsWeight : 0;
   score -= extraVersionPenalty * 9;
+  score += hasArtistInTitle ? 6 : 0;
+  score -= exactTitleMatch ? 14 : 0;
 
   const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("концерт");
   if (!queryHintsLongVersion && durationSec > 11 * 60) {
@@ -300,7 +340,7 @@ function scoreCandidate(track, queryMeta) {
 }
 
 function rankCandidatesByQuery(candidates, query) {
-  const uniqueCandidates = dedupeTracksByUrl(candidates);
+  const uniqueCandidates = dedupeTracksByIdentity(dedupeTracksByUrl(candidates));
   if (uniqueCandidates.length <= 1) {
     return uniqueCandidates;
   }
@@ -324,6 +364,27 @@ function rankCandidatesByQuery(candidates, query) {
   });
 
   return pool.map((entry) => entry.track);
+}
+
+async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_RESOLVE_LIMIT) {
+  const selectedUrls = urls.slice(0, Math.max(1, maxCount));
+  if (selectedUrls.length === 0) {
+    return [];
+  }
+
+  const settled = await Promise.allSettled(selectedUrls.map((url) => resolveCandidateVideo(url, requestedBy)));
+  const resolved = [];
+
+  settled.forEach((result, index) => {
+    const url = selectedUrls[index];
+    if (result.status === "fulfilled") {
+      resolved.push(result.value);
+    } else {
+      console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${result.reason?.message || "Unknown error"}`);
+    }
+  });
+
+  return resolved;
 }
 
 async function resolveSearchCandidates(query, requestedBy, options = {}) {
@@ -374,33 +435,27 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
   const uniqueCandidates = dedupeTracksByUrl(rawCandidates);
   const seenUrls = new Set(uniqueCandidates.map((track) => track.url));
 
-  if (uniqueCandidates.length < limit) {
-    const apiUrls = await searchYoutubeByApi(normalizedQuery, {
+  const [apiByRelevance, apiByViews] = await Promise.all([
+    searchYoutubeByApi(normalizedQuery, {
+      maxResults: targetSearchSize,
+      order: "relevance",
+    }).catch(() => []),
+    searchYoutubeByApi(normalizedQuery, {
       maxResults: targetSearchSize,
       order: "viewCount",
-    }).catch(() => []);
+    }).catch(() => []),
+  ]);
 
-    for (const url of apiUrls) {
-      if (seenUrls.has(url)) {
-        continue;
-      }
+  const apiUrls = [...new Set([...apiByRelevance, ...apiByViews])].filter((url) => !seenUrls.has(url));
+  const apiResolvedTracks = await resolveCandidateVideosFromUrls(apiUrls, requestedBy, Math.min(targetSearchSize, API_RESOLVE_LIMIT));
 
-      try {
-        const track = await resolveCandidateVideo(url, requestedBy);
-        if (!track?.url || seenUrls.has(track.url)) {
-          continue;
-        }
-
-        uniqueCandidates.push(track);
-        seenUrls.add(track.url);
-
-        if (uniqueCandidates.length >= targetSearchSize) {
-          break;
-        }
-      } catch (error) {
-        console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
-      }
+  for (const track of apiResolvedTracks) {
+    if (!track?.url || seenUrls.has(track.url)) {
+      continue;
     }
+
+    uniqueCandidates.push(track);
+    seenUrls.add(track.url);
   }
 
   const rankedCandidates = rankCandidatesByQuery(uniqueCandidates, normalizedQuery);
