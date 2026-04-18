@@ -507,7 +507,8 @@ class GuildMusicPlayer {
     }
   }
 
-  async refreshPanel() {
+  async refreshPanel(options = {}) {
+    const { moveToBottom = false } = options;
     const channel = await this.getTextChannel();
     if (!channel) return;
 
@@ -516,12 +517,23 @@ class GuildMusicPlayer {
       components: [buildControlsRow(this)],
     };
 
-    if (this.panelMessageId) {
+    if (this.panelMessageId && !moveToBottom) {
       try {
         const message = await channel.messages.fetch(this.panelMessageId);
         await message.edit(payload);
         return;
       } catch {
+        this.panelMessageId = null;
+      }
+    }
+
+    if (this.panelMessageId && moveToBottom) {
+      try {
+        const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+        if (message) {
+          await message.delete().catch(() => {});
+        }
+      } finally {
         this.panelMessageId = null;
       }
     }

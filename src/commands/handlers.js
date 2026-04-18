@@ -158,7 +158,7 @@ async function handlePlay(interaction, manager) {
     await interaction.editReply({
       embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
     });
-    await player.refreshPanel();
+    await player.refreshPanel({ moveToBottom: true });
   } catch (error) {
     console.error("[Command:/play]", error);
     await interaction.editReply(`Ошибка: ${error.message}`);
