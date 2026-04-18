@@ -56,6 +56,7 @@ class GuildMusicPlayer {
     this.boundConnection = null;
     this.autoDisconnectTimer = null;
     this.updateInterval = null;
+    this.updateTimeout = null;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -145,11 +146,11 @@ class GuildMusicPlayer {
 
   async playIfIdle() {
     if (this.currentTrack || this.transitionLock) {
-      await this.refreshPanel();
-      return;
+      return false;
     }
 
     await this.playNext();
+    return true;
   }
 
   async playNext() {
@@ -161,7 +162,7 @@ class GuildMusicPlayer {
     try {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
-        this.currentTrack = { ...next, startedAt: Date.now() };
+        this.currentTrack = { ...next, startedAt: null };
 
         try {
           console.log(`[Play] Р—Р°РїСѓСЃРє С‚СЂРµРєР°: ${next.title} | ${next.url}`);
@@ -297,6 +298,11 @@ class GuildMusicPlayer {
             throw new Error(ytdlpErrorText.trim() || "Source stream closed before stable start");
           }
 
+          if (this.currentTrack) {
+            this.currentTrack.startedAt = Date.now();
+          }
+
+          await this.clearPanel();
           await this.refreshPanel();
           await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
           this.startProgressUpdater();
@@ -542,18 +548,34 @@ class GuildMusicPlayer {
 
   startProgressUpdater() {
     this.stopProgressUpdater();
-    if (!this.currentTrack) return;
+    if (!this.currentTrack?.startedAt) return;
 
-    this.updateInterval = setInterval(async () => {
+    const tick = async () => {
       if (this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing) {
         await this.refreshPanel().catch(() => {});
       } else {
         this.stopProgressUpdater();
       }
-    }, 5000);
+    };
+
+    const elapsed = Math.max(0, Date.now() - this.currentTrack.startedAt);
+    const remainder = elapsed % 5000;
+    const delay = remainder === 0 ? 5000 : 5000 - remainder;
+
+    this.updateTimeout = setTimeout(() => {
+      tick().catch(() => {});
+      this.updateInterval = setInterval(() => {
+        tick().catch(() => {});
+      }, 5000);
+    }, delay);
   }
 
   stopProgressUpdater() {
+    if (this.updateTimeout) {
+      clearTimeout(this.updateTimeout);
+      this.updateTimeout = null;
+    }
+
     if (this.updateInterval) {
       clearInterval(this.updateInterval);
       this.updateInterval = null;

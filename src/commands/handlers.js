@@ -63,7 +63,14 @@ async function handlePlay(interaction, manager) {
     const player = manager.getOrCreate(interaction.guild);
     await player.setTextChannel(interaction.channelId);
     await player.connect(memberVoice);
-    const hadActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0;
+    const state = player.player?.state?.status;
+    const hadActivePlayback =
+      state === "playing" ||
+      state === "buffering" ||
+      state === "paused" ||
+      state === "autopaused" ||
+      player.transitionLock ||
+      player.queue.length > 0;
 
     const { accepted, dropped } = player.addTracks(resolved.tracks);
     if (accepted === 0) {
@@ -76,13 +83,13 @@ async function handlePlay(interaction, manager) {
       accepted === 1
         ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
         : `Добавлено треков: ${accepted}`;
-
-    await player.refreshPanel();
     await player.playIfIdle();
 
     // First play in an empty queue: keep only now-playing action message.
     if (!hadActivePlayback) {
-      await interaction.deleteReply().catch(() => null);
+      await interaction
+        .deleteReply()
+        .catch(async () => interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null));
       return;
     }
 
@@ -90,6 +97,7 @@ async function handlePlay(interaction, manager) {
     await interaction.editReply({
       embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
     });
+    await player.refreshPanel();
   } catch (error) {
     console.error("[Command:/play]", error);
     await interaction.editReply(`Ошибка: ${error.message}`);
