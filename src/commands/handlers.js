@@ -33,26 +33,18 @@ function isUrlLike(value) {
 }
 
 function buildTrackPickerRows(customIdPrefix, tracks) {
-  const buttons = tracks.slice(0, 5).map((track, index) =>
-    new ButtonBuilder()
-      .setCustomId(`${customIdPrefix}:${index}`)
-      .setLabel(String(index + 1))
-      .setStyle(index === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
+  return tracks.slice(0, 5).map((track, index) =>
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${customIdPrefix}:${index}`)
+        .setLabel(`${index + 1}. ${truncate(safeLinkText(track.title), 70)}`)
+        .setStyle(ButtonStyle.Secondary)
+    )
   );
-
-  return [new ActionRowBuilder().addComponents(...buttons)];
 }
 
 function buildTrackPickerDescription(query, tracks) {
-  const variants = tracks
-    .slice(0, 5)
-    .map(
-      (track, index) =>
-        `${index + 1}. [${truncate(safeLinkText(track.title), 72)}](${track.url}) • ${formatDuration(track.durationSec)}`
-    )
-    .join("\n");
-
-  return `Запрос: **${safeLinkText(query)}**\nНажми кнопку с номером трека (таймаут 30 сек).\n\n${variants}`;
+  return `Запрос: **${safeLinkText(query)}**\nНажми на кнопку с нужным треком (таймаут 30 сек).`;
 }
 
 async function pickTrackFromMenu(interaction, query, tracks) {
