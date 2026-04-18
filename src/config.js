@@ -22,6 +22,8 @@ module.exports = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN || "",
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID || "",
   DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID || "",
+  MUSIC_TEXT_CHANNEL_ID: process.env.MUSIC_TEXT_CHANNEL_ID || "",
+  MUSIC_TEXT_CHANNEL_NAME: process.env.MUSIC_TEXT_CHANNEL_NAME || "музыка",
   YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY || "",
   YOUTUBE_COOKIE: process.env.YOUTUBE_COOKIE || "",
   SOUNDCLOUD_CLIENT_ID: process.env.SOUNDCLOUD_CLIENT_ID || "",

@@ -1,9 +1,61 @@
 const { MessageFlags } = require("discord.js");
+const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { resolveTracks } = require("../music/resolveTrack");
 const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
+const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
+
+function normalizeChannelName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^\p{L}\p{N}_-]+/gu, "");
+}
+
+function getMusicChannelLabel() {
+  if (MUSIC_TEXT_CHANNEL_ID) {
+    return `<#${MUSIC_TEXT_CHANNEL_ID}>`;
+  }
+
+  const name = MUSIC_TEXT_CHANNEL_NAME || DEFAULT_MUSIC_CHANNEL_NAME;
+  return `#${name}`;
+}
+
+function isAllowedMusicChannel(interaction) {
+  if (!interaction.inGuild() || !interaction.channel) {
+    return false;
+  }
+
+  if (MUSIC_TEXT_CHANNEL_ID) {
+    return interaction.channelId === MUSIC_TEXT_CHANNEL_ID;
+  }
+
+  const expected = normalizeChannelName(MUSIC_TEXT_CHANNEL_NAME || DEFAULT_MUSIC_CHANNEL_NAME);
+  if (!expected) {
+    return true;
+  }
+
+  const current = normalizeChannelName(interaction.channel.name || "");
+  return current.startsWith(expected);
+}
+
+async function ensureMusicChannel(interaction) {
+  if (isAllowedMusicChannel(interaction)) {
+    return true;
+  }
+
+  const message = `Music commands are available only in ${getMusicChannelLabel()}.`;
+
+  if (interaction.deferred || interaction.replied) {
+    await interaction.followUp({ content: message, ...EPHEMERAL_REPLY }).catch(() => null);
+  } else {
+    await interaction.reply({ content: message, ...EPHEMERAL_REPLY }).catch(() => null);
+  }
+
+  return false;
+}
 
 async function clearDeferredReply(interaction) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -42,7 +94,9 @@ async function withPlayer(interaction, manager) {
     return null;
   }
 
-  await player.setTextChannel(interaction.channelId);
+  if (player.textChannelId !== interaction.channelId) {
+    await player.setTextChannel(interaction.channelId);
+  }
   return player;
 }
 
@@ -242,6 +296,10 @@ async function handleLoop(interaction, manager) {
 }
 
 async function handleButton(interaction, manager) {
+  if (!(await ensureMusicChannel(interaction))) {
+    return;
+  }
+
   const player = manager.get(interaction.guild.id);
   if (!player) {
     await interaction.reply({ content: "Плеер неактивен.", ...EPHEMERAL_REPLY });
@@ -294,6 +352,10 @@ async function handleButton(interaction, manager) {
 }
 
 async function handleChatInput(interaction, manager) {
+  if (!(await ensureMusicChannel(interaction))) {
+    return;
+  }
+
   if (interaction.commandName === "play") {
     await handlePlay(interaction, manager);
     return;

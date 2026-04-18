@@ -1,10 +1,8 @@
-﻿const play = require("play-dl");
-const { spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY, YTDLP_COOKIES_PATH } = require("../config");
+const play = require("play-dl");
+const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY } = require("../config");
 
-const ytDlpProbeCache = new Map();
+const SEARCH_RESULTS_LIMIT = 8;
+const SEARCH_TRACK_PACK_SIZE = 4;
 
 function normalizeInput(raw) {
   return raw.trim().replace(/^<(.+)>$/g, "$1");
@@ -16,117 +14,6 @@ function isUrl(value) {
     return true;
   } catch {
     return false;
-  }
-}
-
-function resolveYtDlpCookiesPath() {
-  const configuredPath = String(YTDLP_COOKIES_PATH || "").trim();
-  if (!configuredPath) {
-    return null;
-  }
-
-  const absolutePath = path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(process.cwd(), configuredPath);
-
-  return fs.existsSync(absolutePath) ? absolutePath : null;
-}
-
-async function probeYtDlp(url) {
-  const cached = ytDlpProbeCache.get(url);
-  if (cached) {
-    return cached;
-  }
-
-  const probe = await new Promise((resolve) => {
-    const args = [
-      "-g",
-      "--no-playlist",
-      "--no-warnings",
-      "--quiet",
-      "--geo-bypass",
-      "--force-ipv4",
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio/best",
-      "--extractor-args",
-      "youtube:player_client=android,ios,tv",
-    ];
-
-    const cookiesPath = resolveYtDlpCookiesPath();
-    if (cookiesPath) {
-      args.push("--cookies", cookiesPath);
-    }
-
-    args.push(url);
-
-    let stdout = "";
-    let stderr = "";
-    let done = false;
-
-    const finish = (result) => {
-      if (done) {
-        return;
-      }
-      done = true;
-      resolve(result);
-    };
-
-    const process = spawn("yt-dlp", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const timeout = setTimeout(() => {
-      process.kill("SIGKILL");
-      finish({ ok: false, reason: "timeout" });
-    }, 12_000);
-
-    process.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    process.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    process.on("error", (error) => {
-      clearTimeout(timeout);
-
-      if (error.code === "ENOENT") {
-        finish({ ok: true, reason: "yt-dlp-missing" });
-        return;
-      }
-
-      finish({ ok: false, reason: error.message });
-    });
-
-    process.on("close", (code) => {
-      clearTimeout(timeout);
-      const output = stdout.trim();
-
-      if (code === 0 && output) {
-        finish({ ok: true, reason: "ok" });
-        return;
-      }
-
-      finish({
-        ok: false,
-        reason: stderr.trim() || output || `yt-dlp exit code ${code}`,
-      });
-    });
-  });
-
-  ytDlpProbeCache.set(url, probe);
-  return probe;
-}
-
-function mergeUniqueCandidateUrls(items, seenUrls, out) {
-  for (const url of items) {
-    if (!url || seenUrls.has(url)) {
-      continue;
-    }
-
-    seenUrls.add(url);
-    out.push(url);
   }
 }
 
@@ -146,7 +33,7 @@ function toYouTubeTrack(video, requestedBy) {
   const durationSec = Number(video.durationInSec) || 0;
 
   return {
-    title: video.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
+    title: video.title || "Без названия",
     url: video.url,
     source: "YouTube",
     author: video.channel?.name || video.channel?.title || "YouTube",
@@ -163,7 +50,7 @@ function toSoundCloudTrack(track, requestedBy) {
   const durationMs = Number(track.durationInMs) || (durationSec > 0 ? durationSec * 1000 : 0);
 
   return {
-    title: track.name || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
+    title: track.name || "Без названия",
     url: track.permalink || track.url,
     source: "SoundCloud",
     author: track.user?.name || "SoundCloud",
@@ -175,22 +62,34 @@ function toSoundCloudTrack(track, requestedBy) {
   };
 }
 
+function packSearchTracks(rawTracks, query) {
+  const playable = rawTracks.filter((track) => track?.url).slice(0, SEARCH_TRACK_PACK_SIZE);
+  if (playable.length === 0) {
+    return null;
+  }
+
+  const [first, ...fallbackTracks] = playable;
+  first.searchQuery = query;
+  first.fallbackTracks = fallbackTracks;
+  return first;
+}
+
 async function searchYoutubeByApi(query) {
   if (!YOUTUBE_API_KEY) {
-    return null;
+    return [];
   }
 
   const params = new URLSearchParams({
     part: "snippet",
     q: query,
     type: "video",
-    maxResults: "10",
+    maxResults: String(SEARCH_RESULTS_LIMIT),
     key: YOUTUBE_API_KEY,
   });
 
   const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
   if (!response.ok) {
-    return null;
+    return [];
   }
 
   const data = await response.json();
@@ -230,7 +129,7 @@ async function resolveYoutubeUrl(url, requestedBy) {
       title: playlist.title || "YouTube playlist",
     };
   } catch (error) {
-    throw new Error(`РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ YouTube РїР»РµР№Р»РёСЃС‚: ${error.message}`);
+    throw new Error(`Не удалось открыть YouTube плейлист: ${error.message}`);
   }
 }
 
@@ -262,81 +161,67 @@ async function resolveSoundCloudUrl(url, requestedBy) {
 async function resolveCandidateVideo(url, requestedBy) {
   const info = await play.video_basic_info(url);
   if (!info?.video_details?.url) {
-    throw new Error("РџСѓСЃС‚РѕР№ РѕС‚РІРµС‚ РѕС‚ YouTube");
+    throw new Error("Пустой ответ от YouTube");
   }
 
-  return {
-    tracks: [toYouTubeTrack(info.video_details, requestedBy)],
-    kind: "youtube_search_builtin",
-  };
+  return toYouTubeTrack(info.video_details, requestedBy);
 }
 
 async function resolveFromSearch(query, requestedBy) {
   console.log(`[Resolve] Поиск по тексту: "${query}"`);
 
-  const candidateUrls = [];
-  const seenUrls = new Set();
-
-  if (YOUTUBE_API_KEY) {
-    const apiUrls = await searchYoutubeByApi(query).catch(() => null);
-    if (Array.isArray(apiUrls) && apiUrls.length > 0) {
-      mergeUniqueCandidateUrls(apiUrls, seenUrls, candidateUrls);
-    }
-  }
-
   try {
     const results = await play.search(query, {
       source: { youtube: "video" },
-      limit: 15,
+      limit: SEARCH_RESULTS_LIMIT,
     });
 
-    if (!results || results.length === 0) {
-      throw new Error("Ничего не найдено по вашему запросу.");
-    }
+    const tracksFromSearch = (results || [])
+      .map((video) => toYouTubeTrack(video, requestedBy))
+      .filter((track) => track?.url);
 
-    mergeUniqueCandidateUrls(
-      results.map((video) => video?.url).filter(Boolean),
-      seenUrls,
-      candidateUrls
-    );
-
-    const playableTracks = [];
-    for (const url of candidateUrls) {
-      try {
-        const probe = await probeYtDlp(url);
-        if (!probe.ok) {
-          console.warn(`[Resolve] Кандидат не воспроизводится: ${url} | ${probe.reason}`);
-          continue;
-        }
-
-        const resolved = await resolveCandidateVideo(url, requestedBy);
-        playableTracks.push(resolved.tracks[0]);
-
-        if (playableTracks.length >= 4) {
-          break;
-        }
-      } catch (error) {
-        console.warn(`[Resolve] Кандидат пропущен: ${url} | ${error.message}`);
-      }
-    }
-
-    if (playableTracks.length > 0) {
-      const [first, ...fallbackTracks] = playableTracks;
-      first.searchQuery = query;
-      first.fallbackTracks = fallbackTracks;
-
-      console.log(`[Resolve] Выбран кандидат: ${first.url}; запасных: ${fallbackTracks.length}`);
+    const packedTrack = packSearchTracks(tracksFromSearch, query);
+    if (packedTrack) {
+      console.log(
+        `[Resolve] Выбран кандидат из play.search: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`
+      );
       return {
-        tracks: [first],
+        tracks: [packedTrack],
         kind: "youtube_search",
       };
     }
-
-    throw new Error("Не удалось подобрать доступный трек по запросу.");
   } catch (error) {
-    console.error(`[Resolve] Ошибка поиска "${query}":`, error.message);
-    throw new Error(`Не удалось найти трек: ${error.message}`);
+    console.warn(`[Resolve] Ошибка play.search "${query}": ${error.message}`);
   }
+
+  const apiUrls = await searchYoutubeByApi(query).catch(() => []);
+  if (Array.isArray(apiUrls) && apiUrls.length > 0) {
+    const recoveredTracks = [];
+
+    for (const url of apiUrls) {
+      try {
+        const track = await resolveCandidateVideo(url, requestedBy);
+        recoveredTracks.push(track);
+
+        if (recoveredTracks.length >= SEARCH_TRACK_PACK_SIZE) {
+          break;
+        }
+      } catch (error) {
+        console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
+      }
+    }
+
+    const packedTrack = packSearchTracks(recoveredTracks, query);
+    if (packedTrack) {
+      console.log(`[Resolve] Выбран API-кандидат: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`);
+      return {
+        tracks: [packedTrack],
+        kind: "youtube_search_api",
+      };
+    }
+  }
+
+  throw new Error("Не удалось найти трек по запросу.");
 }
 
 async function resolveTracks(query, requestedBy) {
@@ -357,7 +242,7 @@ async function resolveTracks(query, requestedBy) {
       return soundCloudResolved;
     }
 
-    throw new Error("Р­С‚Р° СЃСЃС‹Р»РєР° РїРѕРєР° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ. РСЃРїРѕР»СЊР·СѓР№ YouTube/SoundCloud.");
+    throw new Error("Эта ссылка пока не поддерживается. Используй YouTube/SoundCloud.");
   }
 
   return resolveFromSearch(input, requestedBy);
@@ -366,4 +251,3 @@ async function resolveTracks(query, requestedBy) {
 module.exports = {
   resolveTracks,
 };
-
