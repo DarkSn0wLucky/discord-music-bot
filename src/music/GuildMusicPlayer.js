@@ -10,7 +10,7 @@ const {
   StreamType,
 } = require("@discordjs/voice");
 
-const play = require("play-dl");
+const { spawn } = require("child_process");
 const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE } = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { safeLinkText } = require("../utils/format");
@@ -30,12 +30,17 @@ class GuildMusicPlayer {
     this.connection = null;
     this.boundConnection = null;
     this.autoDisconnectTimer = null;
+    this.updateInterval = null;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    this.updateInterval = null;
+    this.player.on("stateChange", (oldState, newState) => {
+      console.log(
+        `[PlayerState:${this.guild.id}] ${oldState.status} -> ${newState.status} | current=${this.currentTrack?.title || "none"}`
+      );
+    });
 
     this.player.on(AudioPlayerStatus.Idle, () => {
       this.handleTrackEnd().catch((error) => {
@@ -74,6 +79,7 @@ class GuildMusicPlayer {
 
   async connect(voiceChannel) {
     this.clearAutoDisconnect();
+
     const existing = getVoiceConnection(this.guild.id);
     if (existing && existing.joinConfig.channelId !== voiceChannel.id) {
       existing.destroy();
@@ -97,6 +103,7 @@ class GuildMusicPlayer {
       this.boundConnection = this.connection;
       this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
         if (!this.connection) return;
+
         try {
           await Promise.race([
             entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
@@ -116,6 +123,7 @@ class GuildMusicPlayer {
       await this.refreshPanel();
       return;
     }
+
     await this.playNext();
   }
 
@@ -131,24 +139,55 @@ class GuildMusicPlayer {
         this.currentTrack = { ...next, startedAt: Date.now() };
 
         try {
-          console.log(`[Play] Запуск: ${next.title}`);
+          console.log(`[Play] Запуск трека: ${next.title} | ${next.url}`);
 
-          const { spawn } = require("child_process");
+          let ytdlpFailed = false;
+          let ytdlpErrorText = "";
+          let processClosed = false;
 
-          const ytDlp = spawn("yt-dlp", [
-            "-o", "-",
-            "-f", "bestaudio[ext=m4a]/bestaudio/best",
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            "--buffer-size", "128K",
-            "--geo-bypass",
-            next.url
-          ], { stdio: ["ignore", "pipe", "pipe"] });
+          const ytDlp = spawn(
+            "yt-dlp",
+            [
+              "-o",
+              "-",
+              "-f",
+              "bestaudio[ext=m4a]/bestaudio/best",
+              "--no-playlist",
+              "--no-warnings",
+              "--quiet",
+              "--buffer-size",
+              "128K",
+              "--geo-bypass",
+              next.url,
+            ],
+            { stdio: ["ignore", "pipe", "pipe"] }
+          );
 
           ytDlp.stderr.on("data", (data) => {
             const line = data.toString().trim();
-            if (line) console.error(`[yt-dlp] ${line}`);
+            if (!line) return;
+
+            console.error(`[yt-dlp stderr] ${line}`);
+            ytdlpErrorText += `${line}\n`;
+
+            if (/ERROR:/i.test(line) || /This video is not available/i.test(line)) {
+              ytdlpFailed = true;
+            }
+          });
+
+          ytDlp.on("error", (err) => {
+            ytdlpFailed = true;
+            ytdlpErrorText += `${err.message}\n`;
+            console.error(`[yt-dlp process error] ${err.message}`);
+          });
+
+          ytDlp.on("close", (code, signal) => {
+            processClosed = true;
+            console.log(`[yt-dlp exited] code=${code} signal=${signal} track=${next.title}`);
+
+            if (code !== 0) {
+              ytdlpFailed = true;
+            }
           });
 
           const resource = createAudioResource(ytDlp.stdout, {
@@ -162,27 +201,82 @@ class GuildMusicPlayer {
 
           this.player.play(resource);
 
+          await new Promise((resolve, reject) => {
+            let settled = false;
+
+            const cleanup = () => {
+              this.player.off("stateChange", onStateChange);
+              clearTimeout(timeout);
+            };
+
+            const finishResolve = () => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              resolve();
+            };
+
+            const finishReject = (error) => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              reject(error);
+            };
+
+            const onStateChange = (oldState, newState) => {
+              if (newState.status === AudioPlayerStatus.Playing) {
+                finishResolve();
+                return;
+              }
+
+              if (newState.status === AudioPlayerStatus.Idle && (ytdlpFailed || processClosed)) {
+                finishReject(
+                  new Error(
+                    ytdlpErrorText.trim() || "Источник закрыл поток до начала воспроизведения"
+                  )
+                );
+              }
+            };
+
+            const timeout = setTimeout(() => {
+              if (this.player.state.status === AudioPlayerStatus.Playing) {
+                finishResolve();
+                return;
+              }
+
+              if (ytdlpFailed || processClosed) {
+                finishReject(
+                  new Error(
+                    ytdlpErrorText.trim() || "Не удалось дождаться стабильного запуска потока"
+                  )
+                );
+                return;
+              }
+
+              finishResolve();
+            }, 4000);
+
+            this.player.on("stateChange", onStateChange);
+          });
+
           await this.refreshPanel();
           await this.sendAction("Старт", `[${safeLinkText(next.title)}](${next.url})`);
-
           this.startProgressUpdater();
-
-          // Даём время на инициализацию потока
-          await new Promise(r => setTimeout(r, 2500));
-
           return;
-
         } catch (error) {
-          console.error(`[Play Error] ${next.title}:`, error.message);
+          console.error(`[Play Error] ${next.title}: ${error.message}`);
           this.currentTrack = null;
-          await this.sendAction("Трек пропущен", `**${safeLinkText(next.title)}**\n\`${error.message}\``);
+
+          await this.sendAction(
+            "Трек пропущен",
+            `**${safeLinkText(next.title)}**\n\`${error.message}\``
+          );
         }
       }
 
       this.currentTrack = null;
       await this.refreshPanel();
       this.scheduleAutoDisconnect();
-
     } finally {
       this.transitionLock = false;
     }
@@ -218,6 +312,7 @@ class GuildMusicPlayer {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нет активного трека." };
     }
+
     if (this.isPaused()) {
       const resumed = this.player.unpause();
       await this.refreshPanel();
@@ -225,6 +320,7 @@ class GuildMusicPlayer {
         ? { ok: true, message: "Продолжаю воспроизведение." }
         : { ok: false, message: "Не удалось продолжить." };
     }
+
     const paused = this.player.pause(true);
     await this.refreshPanel();
     return paused
@@ -236,6 +332,7 @@ class GuildMusicPlayer {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нет активного трека." };
     }
+
     const paused = this.player.pause(true);
     await this.refreshPanel();
     return paused
@@ -255,6 +352,7 @@ class GuildMusicPlayer {
     if (!this.currentTrack) {
       return { ok: false, message: "Сейчас нечего скипать." };
     }
+
     this.forceSkip = true;
     this.player.stop(true);
     await this.sendAction("Скип", "Текущий трек пропущен.");
@@ -283,10 +381,12 @@ class GuildMusicPlayer {
     if (this.queue.length < 2) {
       return { ok: false, message: "Для шафла нужно минимум 2 трека в очереди." };
     }
+
     for (let i = this.queue.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
     }
+
     await this.refreshPanel();
     return { ok: true, message: "Очередь перемешана." };
   }
@@ -311,9 +411,11 @@ class GuildMusicPlayer {
     if (sendNotice) {
       await this.sendAction("Стоп", reason);
     }
+
     if (this.connection) {
       this.connection.destroy();
     }
+
     this.connection = null;
     this.boundConnection = null;
     this.voiceChannelId = null;
@@ -324,7 +426,9 @@ class GuildMusicPlayer {
 
     this.autoDisconnectTimer = setTimeout(async () => {
       this.autoDisconnectTimer = null;
+
       if (this.currentTrack || this.queue.length > 0 || !this.connection) return;
+
       await this.disconnectFromVoice(true, "Пустая очередь более 3 минут.");
       await this.refreshPanel();
     }, AUTO_DISCONNECT_MS);
@@ -420,7 +524,9 @@ class GuildMusicPlayer {
 
     try {
       const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
-      if (message) await message.delete().catch(() => {});
+      if (message) {
+        await message.delete().catch(() => {});
+      }
     } catch (err) {
       console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
     } finally {

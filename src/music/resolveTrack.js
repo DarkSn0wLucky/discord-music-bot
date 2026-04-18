@@ -33,7 +33,7 @@ function toYouTubeTrack(video, requestedBy) {
     title: video.title || "Без названия",
     url: video.url,
     source: "YouTube",
-    author: video.channel?.name || "YouTube",
+    author: video.channel?.name || video.channel?.title || "YouTube",
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
     thumbnail: youtubeThumb(video),
@@ -68,7 +68,7 @@ async function searchYoutubeByApi(query) {
     part: "snippet",
     q: query,
     type: "video",
-    maxResults: "1",
+    maxResults: "5",
     key: YOUTUBE_API_KEY,
   });
 
@@ -78,13 +78,12 @@ async function searchYoutubeByApi(query) {
   }
 
   const data = await response.json();
-  const item = data.items?.[0];
-  const id = item?.id?.videoId;
-  if (!id) {
-    return null;
-  }
+  const items = Array.isArray(data.items) ? data.items : [];
 
-  return `https://www.youtube.com/watch?v=${id}`;
+  return items
+    .map((item) => item?.id?.videoId)
+    .filter(Boolean)
+    .map((id) => `https://www.youtube.com/watch?v=${id}`);
 }
 
 async function resolveYoutubeUrl(url, requestedBy) {
@@ -101,18 +100,22 @@ async function resolveYoutubeUrl(url, requestedBy) {
     };
   }
 
-  const playlist = await play.playlist_info(url, { incomplete: true });
-  const videos = await playlist.all_videos();
-  const tracks = videos
-    .filter((video) => video.url)
-    .slice(0, MAX_PLAYLIST_ITEMS)
-    .map((video) => toYouTubeTrack(video, requestedBy));
+  try {
+    const playlist = await play.playlist_info(url, { incomplete: true });
+    const videos = await playlist.all_videos();
+    const tracks = videos
+      .filter((video) => video?.url)
+      .slice(0, MAX_PLAYLIST_ITEMS)
+      .map((video) => toYouTubeTrack(video, requestedBy));
 
-  return {
-    tracks,
-    kind: "youtube_playlist",
-    title: playlist.title || "YouTube playlist",
-  };
+    return {
+      tracks,
+      kind: "youtube_playlist",
+      title: playlist.title || "YouTube playlist",
+    };
+  } catch (error) {
+    throw new Error(`Не удалось открыть YouTube плейлист: ${error.message}`);
+  }
 }
 
 async function resolveSoundCloudUrl(url, requestedBy) {
@@ -140,43 +143,65 @@ async function resolveSoundCloudUrl(url, requestedBy) {
   };
 }
 
+async function resolveCandidateVideo(url, requestedBy) {
+  const info = await play.video_basic_info(url);
+  if (!info?.video_details?.url) {
+    throw new Error("Пустой ответ от YouTube");
+  }
+
+  return {
+    tracks: [toYouTubeTrack(info.video_details, requestedBy)],
+    kind: "youtube_search_builtin",
+  };
+}
+
 async function resolveFromSearch(query, requestedBy) {
   console.log(`[Resolve] Поиск по тексту: "${query}"`);
 
-  // Вариант 1: YouTube Data API (если ключ есть — используем его)
   if (YOUTUBE_API_KEY) {
-    const fromApi = await searchYoutubeByApi(query).catch(() => null);
-    if (fromApi) {
-      try {
-        const info = await play.video_basic_info(fromApi);
-        return {
-          tracks: [toYouTubeTrack(info.video_details, requestedBy)],
-          kind: "youtube_search_api",
-        };
-      } catch (e) {
-        console.warn("[Resolve] YouTube API не сработал, используем встроенный поиск");
+    const apiUrls = await searchYoutubeByApi(query).catch(() => null);
+
+    if (Array.isArray(apiUrls) && apiUrls.length > 0) {
+      for (const url of apiUrls) {
+        try {
+          const resolved = await resolveCandidateVideo(url, requestedBy);
+          console.log(`[Resolve] YouTube API выбрал: ${url}`);
+          return {
+            ...resolved,
+            kind: "youtube_search_api",
+          };
+        } catch (error) {
+          console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
+        }
       }
+
+      console.warn("[Resolve] YouTube API не дал доступных видео, пробуем встроенный поиск");
     }
   }
 
-  // Вариант 2: Встроенный поиск play-dl (основной)
   try {
     const results = await play.search(query, {
       source: { youtube: "video" },
-      limit: 3,                    // берём 3 результата, на случай если первый неудачный
+      limit: 5,
     });
 
     if (!results || results.length === 0) {
       throw new Error("Ничего не найдено по вашему запросу.");
     }
 
-    // Берём первый (самый релевантный) результат
-    const video = results[0];
+    for (const video of results) {
+      if (!video?.url) continue;
 
-    return {
-      tracks: [toYouTubeTrack(video, requestedBy)],
-      kind: "youtube_search_builtin",
-    };
+      try {
+        console.log(`[Resolve] Проверка кандидата: ${video.title} | ${video.url}`);
+        const resolved = await resolveCandidateVideo(video.url, requestedBy);
+        return resolved;
+      } catch (error) {
+        console.warn(`[Resolve] Кандидат пропущен: ${video.url} | ${error.message}`);
+      }
+    }
+
+    throw new Error("Не удалось подобрать доступный трек по запросу.");
   } catch (error) {
     console.error(`[Resolve] Ошибка поиска "${query}":`, error.message);
     throw new Error(`Не удалось найти трек: ${error.message}`);
@@ -210,4 +235,3 @@ async function resolveTracks(query, requestedBy) {
 module.exports = {
   resolveTracks,
 };
-
