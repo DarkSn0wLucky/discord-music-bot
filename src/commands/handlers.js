@@ -1,4 +1,4 @@
-const { ActionRowBuilder, ComponentType, MessageFlags, StringSelectMenuBuilder } = require("discord.js");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, MessageFlags } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrack");
 const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
@@ -32,21 +32,27 @@ function isUrlLike(value) {
   }
 }
 
-function buildTrackPickerRow(customId, tracks) {
-  const options = tracks.slice(0, 5).map((track, index) => ({
-    label: truncate(safeLinkText(track.title), 95),
-    description: truncate(`${track.author} • ${formatDuration(track.durationSec)}`, 95),
-    value: String(index),
-  }));
-
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId(customId)
-      .setPlaceholder("Выбери трек из похожих вариантов")
-      .setMinValues(1)
-      .setMaxValues(1)
-      .addOptions(options)
+function buildTrackPickerRows(customIdPrefix, tracks) {
+  const buttons = tracks.slice(0, 5).map((track, index) =>
+    new ButtonBuilder()
+      .setCustomId(`${customIdPrefix}:${index}`)
+      .setLabel(String(index + 1))
+      .setStyle(index === 0 ? ButtonStyle.Primary : ButtonStyle.Secondary)
   );
+
+  return [new ActionRowBuilder().addComponents(...buttons)];
+}
+
+function buildTrackPickerDescription(query, tracks) {
+  const variants = tracks
+    .slice(0, 5)
+    .map(
+      (track, index) =>
+        `${index + 1}. [${truncate(safeLinkText(track.title), 72)}](${track.url}) • ${formatDuration(track.durationSec)}`
+    )
+    .join("\n");
+
+  return `Запрос: **${safeLinkText(query)}**\nНажми кнопку с номером трека (таймаут 30 сек).\n\n${variants}`;
 }
 
 async function pickTrackFromMenu(interaction, query, tracks) {
@@ -54,25 +60,25 @@ async function pickTrackFromMenu(interaction, query, tracks) {
     return null;
   }
 
-  const customId = `music:pick:${interaction.id}`;
-  const pickerRow = buildTrackPickerRow(customId, tracks);
+  const customIdPrefix = `pick:${interaction.id}`;
+  const pickerRows = buildTrackPickerRows(customIdPrefix, tracks);
 
   const promptMessage = await interaction.editReply({
     embeds: [
       buildActionEmbed(
         "Выбор трека",
-        `Запрос: **${safeLinkText(query)}**\nВыбери один из 5 похожих популярных треков (таймаут 30 сек).`
+        buildTrackPickerDescription(query, tracks)
       ),
     ],
-    components: [pickerRow],
+    components: pickerRows,
   });
 
   try {
     const selected = await promptMessage.awaitMessageComponent({
-      componentType: ComponentType.StringSelect,
+      componentType: ComponentType.Button,
       time: 30_000,
       filter: async (componentInteraction) => {
-        if (componentInteraction.customId !== customId) {
+        if (!componentInteraction.customId.startsWith(`${customIdPrefix}:`)) {
           return false;
         }
 
@@ -90,7 +96,7 @@ async function pickTrackFromMenu(interaction, query, tracks) {
       },
     });
 
-    const selectedIndex = Number(selected.values?.[0] ?? -1);
+    const selectedIndex = Number(selected.customId.split(":").pop());
     const track = tracks[selectedIndex] || tracks[0];
     await selected.update({
       embeds: [buildActionEmbed("Выбрано", `[${safeLinkText(track.title)}](${track.url}) • ${formatDuration(track.durationSec)}`)],

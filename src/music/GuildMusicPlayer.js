@@ -443,6 +443,7 @@ class GuildMusicPlayer {
 
     await this.disconnectFromVoice(false);
     await this.clearPanel();
+    await this.clearRecentPanels();
 
     return hadTracks
       ? { ok: true, message: "РћС‡РµСЂРµРґСЊ РѕС‡РёС‰РµРЅР°, Р±РѕС‚ РѕС‚РєР»СЋС‡С‘РЅ." }
@@ -637,6 +638,38 @@ class GuildMusicPlayer {
       console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
     } finally {
       this.panelMessageId = null;
+    }
+  }
+
+  isMusicPanelMessage(message) {
+    if (!message || message.author?.id !== this.client.user?.id) {
+      return false;
+    }
+
+    if (!Array.isArray(message.components) || message.components.length === 0) {
+      return false;
+    }
+
+    return message.components.some((row) =>
+      Array.isArray(row.components) &&
+      row.components.some((component) => typeof component.customId === "string" && component.customId.startsWith("music:"))
+    );
+  }
+
+  async clearRecentPanels() {
+    const channel = await this.getTextChannel();
+    if (!channel) {
+      return;
+    }
+
+    const messages = await channel.messages.fetch({ limit: 40 }).catch(() => null);
+    if (!messages) {
+      return;
+    }
+
+    const panelMessages = [...messages.values()].filter((message) => this.isMusicPanelMessage(message));
+    for (const panelMessage of panelMessages) {
+      await panelMessage.delete().catch(() => {});
     }
   }
 }
