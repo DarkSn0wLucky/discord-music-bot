@@ -63,6 +63,7 @@ async function handlePlay(interaction, manager) {
     const player = manager.getOrCreate(interaction.guild);
     await player.setTextChannel(interaction.channelId);
     await player.connect(memberVoice);
+    const hadActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0;
 
     const { accepted, dropped } = player.addTracks(resolved.tracks);
     if (accepted === 0) {
@@ -78,6 +79,12 @@ async function handlePlay(interaction, manager) {
 
     await player.refreshPanel();
     await player.playIfIdle();
+
+    // First play in an empty queue: keep only now-playing action message.
+    if (!hadActivePlayback) {
+      await interaction.deleteReply().catch(() => null);
+      return;
+    }
 
     const dropHint = dropped > 0 ? `\nНе добавлено из-за лимита очереди: ${dropped}` : "";
     await interaction.editReply({
@@ -149,15 +156,16 @@ async function handleStop(interaction, manager) {
     return;
   }
 
+  await interaction.deferReply();
   const result = await player.stop();
-  // For successful stop, avoid extra ephemeral/public ack message.
+
+  // For successful stop, avoid extra ack message in the channel.
   if (result.ok) {
-    await interaction.deferReply({ ...EPHEMERAL_REPLY });
     await interaction.deleteReply().catch(() => null);
     return;
   }
 
-  await interaction.reply({ content: result.message, ...EPHEMERAL_REPLY });
+  await interaction.editReply(result.message);
 }
 
 async function handleQueue(interaction, manager) {
@@ -204,7 +212,7 @@ async function handleLoop(interaction, manager) {
 
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
-    await interaction.reply({ content: voiceCheck.message, ephemeral: true });
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
     return;
   }
 
@@ -316,7 +324,7 @@ async function handleChatInput(interaction, manager) {
     return;
   }
 
-  await interaction.reply({ content: "Неизвестная команда.", ephemeral: true });
+  await interaction.reply({ content: "Неизвестная команда.", ...EPHEMERAL_REPLY });
 }
 
 module.exports = {
