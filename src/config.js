@@ -25,6 +25,7 @@ module.exports = {
   YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY || "",
   YOUTUBE_COOKIE: process.env.YOUTUBE_COOKIE || "",
   SOUNDCLOUD_CLIENT_ID: process.env.SOUNDCLOUD_CLIENT_ID || "",
+  YTDLP_COOKIES_PATH: process.env.YTDLP_COOKIES_PATH || "cookies.txt",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#ff5ca8",
   MAX_QUEUE_SIZE: asNumber(process.env.MAX_QUEUE_SIZE, 150),
   MAX_PLAYLIST_ITEMS: asNumber(process.env.MAX_PLAYLIST_ITEMS, 50),
@@ -32,4 +33,3 @@ module.exports = {
   DEFAULT_VOLUME: asNumber(process.env.DEFAULT_VOLUME, 0.75),
   assertEnv,
 };
-

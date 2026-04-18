@@ -26,6 +26,7 @@ DISCORD_CLIENT_ID=...
 DISCORD_GUILD_ID=...
 YOUTUBE_API_KEY=...
 YOUTUBE_COOKIE=
+YTDLP_COOKIES_PATH=cookies.txt
 SOUNDCLOUD_CLIENT_ID=
 EMBED_COLOR_HEX=#ff5ca8
 MAX_QUEUE_SIZE=150
@@ -39,7 +40,9 @@ DEFAULT_VOLUME=0.75
 - `DISCORD_GUILD_ID` рекомендуется для быстрого обновления slash-команд (моментально в одном сервере).
 - `YOUTUBE_API_KEY` не обязателен, но улучшает текстовый поиск.
 - `YOUTUBE_COOKIE` опционален (может помочь при ограничениях YouTube).
+- `YTDLP_COOKIES_PATH` путь к cookies-файлу для `yt-dlp` (по умолчанию `cookies.txt` в корне проекта).
 - `SOUNDCLOUD_CLIENT_ID` опционален (если пусто, бот попробует взять free client id автоматически).
+- Файл `cookies.txt` не хранится в git и должен лежать на сервере отдельно.
 
 ## 3. Права и Intents для бота
 
@@ -98,4 +101,3 @@ src/
   utils/
 scripts/
 ```
-

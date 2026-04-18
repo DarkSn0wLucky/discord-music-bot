@@ -11,9 +11,24 @@ const {
 } = require("@discordjs/voice");
 
 const { spawn } = require("child_process");
-const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE } = require("../config");
+const fs = require("fs");
+const path = require("path");
+const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, YTDLP_COOKIES_PATH } = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { safeLinkText } = require("../utils/format");
+
+function resolveYtDlpCookiesPath() {
+  const configuredPath = String(YTDLP_COOKIES_PATH || "").trim();
+  if (!configuredPath) {
+    return null;
+  }
+
+  const absolutePath = path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(process.cwd(), configuredPath);
+
+  return fs.existsSync(absolutePath) ? absolutePath : null;
+}
 
 class GuildMusicPlayer {
   constructor({ guild, client }) {
@@ -144,24 +159,29 @@ class GuildMusicPlayer {
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
+          const cookiesPath = resolveYtDlpCookiesPath();
 
-          const ytDlp = spawn(
-            "yt-dlp",
-            [
-              "-o",
-              "-",
-              "-f",
-              "bestaudio[ext=m4a]/bestaudio/best",
-              "--no-playlist",
-              "--no-warnings",
-              "--quiet",
-              "--buffer-size",
-              "128K",
-              "--geo-bypass",
-              next.url,
-            ],
-            { stdio: ["ignore", "pipe", "pipe"] }
-          );
+          const ytDlpArgs = [
+            "-o",
+            "-",
+            "-f",
+            "bestaudio[ext=m4a]/bestaudio/best",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            "--buffer-size",
+            "128K",
+            "--geo-bypass",
+          ];
+
+          if (cookiesPath) {
+            ytDlpArgs.push("--cookies", cookiesPath);
+            console.log(`[yt-dlp] Используем cookies: ${cookiesPath}`);
+          }
+
+          ytDlpArgs.push(next.url);
+
+          const ytDlp = spawn("yt-dlp", ytDlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
 
           ytDlp.stderr.on("data", (data) => {
             const line = data.toString().trim();
