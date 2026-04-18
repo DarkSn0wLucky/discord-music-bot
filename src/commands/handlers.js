@@ -6,6 +6,22 @@ const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
+const playRequestQueueByGuild = new Map();
+
+function enqueuePlayRequest(guildId, task) {
+  const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
+  const next = previous
+    .catch(() => null)
+    .then(task)
+    .finally(() => {
+      if (playRequestQueueByGuild.get(guildId) === next) {
+        playRequestQueueByGuild.delete(guildId);
+      }
+    });
+
+  playRequestQueueByGuild.set(guildId, next);
+  return next;
+}
 
 function normalizeChannelName(value) {
   return String(value || "")
@@ -118,51 +134,53 @@ async function handlePlay(interaction, manager) {
 
   await interaction.deferReply();
 
-  try {
-    const query = interaction.options.getString("query", true);
-    const resolved = await resolveTracks(query, interaction.user);
+  await enqueuePlayRequest(interaction.guild.id, async () => {
+    try {
+      const query = interaction.options.getString("query", true);
+      const resolved = await resolveTracks(query, interaction.user);
 
-    if (!resolved.tracks.length) {
-      await interaction.editReply("Ничего не найдено по запросу.");
-      return;
-    }
-
-    const player = manager.getOrCreate(interaction.guild);
-    await player.setTextChannel(interaction.channelId);
-    await player.connect(memberVoice);
-    const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
-
-    const { accepted, dropped } = player.addTracks(resolved.tracks);
-    if (accepted === 0) {
-      await interaction.editReply("Очередь заполнена, добавить новые треки пока нельзя.");
-      return;
-    }
-
-    const first = resolved.tracks[0];
-    const summary =
-      accepted === 1
-        ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
-        : `Добавлено треков: ${accepted}`;
-    const startedNow = await player.playIfIdle();
-
-    // First play in an empty queue: keep only now-playing action message.
-    if (wasQueueEmpty) {
-      if (!startedNow) {
-        await player.refreshPanel();
+      if (!resolved.tracks.length) {
+        await interaction.editReply("Ничего не найдено по запросу.");
+        return;
       }
-      await clearDeferredReply(interaction);
-      return;
-    }
 
-    const dropHint = dropped > 0 ? `\nНе добавлено из-за лимита очереди: ${dropped}` : "";
-    await interaction.editReply({
-      embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
-    });
-    await player.refreshPanel({ moveToBottom: true });
-  } catch (error) {
-    console.error("[Command:/play]", error);
-    await interaction.editReply(`Ошибка: ${error.message}`);
-  }
+      const player = manager.getOrCreate(interaction.guild);
+      await player.setTextChannel(interaction.channelId);
+      await player.connect(memberVoice);
+      const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
+
+      const { accepted, dropped } = player.addTracks(resolved.tracks);
+      if (accepted === 0) {
+        await interaction.editReply("Очередь заполнена, добавить новые треки пока нельзя.");
+        return;
+      }
+
+      const first = resolved.tracks[0];
+      const summary =
+        accepted === 1
+          ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
+          : `Добавлено треков: ${accepted}`;
+      const startedNow = await player.playIfIdle();
+
+      // First play in an empty queue: keep only now-playing action message.
+      if (wasQueueEmpty) {
+        if (!startedNow) {
+          await player.refreshPanel();
+        }
+        await clearDeferredReply(interaction);
+        return;
+      }
+
+      const dropHint = dropped > 0 ? `\nНе добавлено из-за лимита очереди: ${dropped}` : "";
+      await interaction.editReply({
+        embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
+      });
+      await player.refreshPanel({ moveToBottom: true });
+    } catch (error) {
+      console.error("[Command:/play]", error);
+      await interaction.editReply(`Ошибка: ${error.message}`);
+    }
+  });
 }
 
 async function handleSkip(interaction, manager) {
