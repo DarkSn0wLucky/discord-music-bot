@@ -157,6 +157,7 @@ async function handlePlay(interaction, manager) {
       await player.setTextChannel(interaction.channelId);
       await player.connect(memberVoice);
       const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
+      const queueLengthBeforeAdd = player.queue.length;
 
       const { accepted, dropped } = player.addTracks(resolved.tracks);
       if (accepted === 0) {
@@ -184,7 +185,11 @@ async function handlePlay(interaction, manager) {
       await interaction.editReply({
         embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
       });
-      await player.refreshPanel({ moveToBottom: true });
+      if (queueLengthBeforeAdd === 0) {
+        await player.refreshPanel({ moveToBottom: true });
+      } else {
+        await player.refreshPanel();
+      }
     } catch (error) {
       console.error("[Command:/play]", error);
       await interaction.editReply(`Ошибка: ${error.message}`);
