@@ -308,10 +308,10 @@ class GuildMusicPlayer {
           if (!preservePanelMessage) {
             await this.clearPanel();
           }
-          await this.refreshPanel();
           if (!suppressTrackAction) {
             await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
           }
+          await this.refreshPanel();
           this.startProgressUpdater();
           return;
         } catch (error) {
