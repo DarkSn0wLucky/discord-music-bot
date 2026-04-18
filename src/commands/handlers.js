@@ -33,7 +33,8 @@ function isUrlLike(value) {
 }
 
 function buildTrackPickerRows(customIdPrefix, tracks) {
-  return tracks.slice(0, 5).map((track, index) =>
+  const topTracks = tracks.slice(0, 5);
+  const rows = topTracks.slice(0, 4).map((track, index) =>
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`${customIdPrefix}:${index}`)
@@ -41,6 +42,33 @@ function buildTrackPickerRows(customIdPrefix, tracks) {
         .setStyle(ButtonStyle.Secondary)
     )
   );
+
+  const lastTrack = topTracks[4];
+  if (lastTrack) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${customIdPrefix}:4`)
+          .setLabel(`5. ${truncate(safeLinkText(lastTrack.title), 48)}`)
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`${customIdPrefix}:cancel`)
+          .setLabel("Отменить")
+          .setStyle(ButtonStyle.Danger)
+      )
+    );
+  } else {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${customIdPrefix}:cancel`)
+          .setLabel("Отменить")
+          .setStyle(ButtonStyle.Danger)
+      )
+    );
+  }
+
+  return rows;
 }
 
 function buildTrackPickerDescription(query, tracks) {
@@ -88,7 +116,16 @@ async function pickTrackFromMenu(interaction, query, tracks) {
       },
     });
 
-    const selectedIndex = Number(selected.customId.split(":").pop());
+    const selectedValue = String(selected.customId.split(":").pop());
+    if (selectedValue === "cancel") {
+      await selected.update({
+        embeds: [buildActionEmbed("Выбор отменён", "Добавление трека отменено.")],
+        components: [],
+      });
+      return null;
+    }
+
+    const selectedIndex = Number(selectedValue);
     const track = tracks[selectedIndex] || tracks[0];
     await selected.update({
       embeds: [buildActionEmbed("Выбрано", `[${safeLinkText(track.title)}](${track.url}) • ${formatDuration(track.durationSec)}`)],
@@ -248,10 +285,7 @@ async function handlePlay(interaction, manager) {
         }
 
         const selectedTrack = await pickTrackFromMenu(interaction, query, candidates);
-        if (!selectedTrack) {
-          await interaction.editReply("Не удалось выбрать трек.");
-          return;
-        }
+        if (!selectedTrack) return;
 
         selectedTrack.searchQuery = query;
         selectedTrack.fallbackTracks = candidates.filter((candidate) => candidate.url !== selectedTrack.url).slice(0, 4);
