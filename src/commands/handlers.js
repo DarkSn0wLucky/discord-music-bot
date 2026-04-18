@@ -86,6 +86,15 @@ async function clearDeferredReply(interaction) {
   await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null);
 }
 
+async function sendStoppedByNotice(player, user) {
+  await player
+    .sendAction(
+      "Музыка остановлена",
+      `Сессию завершил <@${user.id}>.\nОчередь очищена, бот отключился от голосового канала.`
+    )
+    .catch(() => null);
+}
+
 function isSameVoiceWithBot(interaction, player) {
   const memberVoiceId = interaction.member?.voice?.channelId;
   if (!memberVoiceId) {
@@ -252,8 +261,8 @@ async function handleStop(interaction, manager) {
   await interaction.deferReply({ ...EPHEMERAL_REPLY });
   const result = await player.stop();
 
-  // For successful stop, avoid extra ack message in the channel.
   if (result.ok) {
+    await sendStoppedByNotice(player, interaction.user);
     await interaction.deleteReply().catch(() => null);
     return;
   }
@@ -355,7 +364,13 @@ async function handleButton(interaction, manager) {
   }
 
   if (interaction.customId === BUTTON_IDS.stop) {
-    await player.stop();
+    const result = await player.stop();
+    if (result.ok) {
+      await sendStoppedByNotice(player, interaction.user);
+      return;
+    }
+
+    await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
     return;
   }
 
