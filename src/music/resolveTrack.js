@@ -1,10 +1,18 @@
 const play = require("play-dl");
-const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY } = require("../config");
+const {
+  MAX_PLAYLIST_ITEMS,
+  SPOTIFY_CLIENT_ID,
+  SPOTIFY_CLIENT_SECRET,
+  SPOTIFY_REFRESH_TOKEN,
+  YOUTUBE_API_KEY,
+} = require("../config");
 
 const SEARCH_RESULTS_LIMIT = 8;
 const SEARCH_TRACK_PACK_SIZE = 4;
 const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
+const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
+const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 
 const QUERY_STOPWORDS = new Set([
   "official",
@@ -74,6 +82,55 @@ function canonicalTitle(value) {
     .trim();
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&#x([\da-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
+function extractMetaContent(html, attr, key) {
+  const escapedAttr = escapeRegExp(attr);
+  const escapedKey = escapeRegExp(key);
+  const patterns = [
+    new RegExp(
+      `<meta[^>]*\\b${escapedAttr}\\s*=\\s*["']${escapedKey}["'][^>]*\\bcontent\\s*=\\s*["']([^"']+)["'][^>]*>`,
+      "i"
+    ),
+    new RegExp(
+      `<meta[^>]*\\bcontent\\s*=\\s*["']([^"']+)["'][^>]*\\b${escapedAttr}\\s*=\\s*["']${escapedKey}["'][^>]*>`,
+      "i"
+    ),
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) {
+      return decodeHtmlEntities(match[1]);
+    }
+  }
+
+  return "";
+}
+
+function extractTitleTag(html) {
+  const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  if (!match?.[1]) {
+    return "";
+  }
+
+  return decodeHtmlEntities(match[1]);
+}
+
 function isUrl(value) {
   try {
     new URL(value);
@@ -128,6 +185,47 @@ function toSoundCloudTrack(track, requestedBy) {
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
   };
+}
+
+function joinArtists(artists) {
+  if (!Array.isArray(artists)) {
+    return "";
+  }
+
+  return artists
+    .map((artist) => String(artist?.name || artist || "").trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .join(" ");
+}
+
+function buildQueryFromArtistTitle(artist, title) {
+  return String(`${artist || ""} ${title || ""}`)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanExternalTitle(title, siteName = "") {
+  let value = decodeHtmlEntities(title || "");
+  if (!value) {
+    return "";
+  }
+
+  const normalizedSiteName = normalizeText(siteName);
+  const normalizedValue = normalizeText(value);
+  if (normalizedSiteName && normalizedValue.endsWith(normalizedSiteName)) {
+    value = value.slice(0, Math.max(0, value.length - siteName.length)).trim();
+  }
+
+  value = value
+    .replace(/\s*[|•]\s*[^|•]+$/u, "")
+    .replace(/\s+[-–—]\s*(yandex music|яндекс музыка|spotify|vk music|вконтакте|deezer|apple music|tidal)\s*$/iu, "")
+    .replace(/^(listen to|watch|слушать)\s+/iu, "")
+    .replace(/\s+(on|в)\s+(spotify|youtube|yandex music|яндекс музыке|vk music|deezer|apple music|tidal)\s*$/iu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return value;
 }
 
 function packSearchTracks(rawTracks, query) {
@@ -402,6 +500,208 @@ async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_
   return resolved;
 }
 
+async function resolveTrackByMetadataQuery(query, requestedBy) {
+  const normalizedQuery = String(query || "").trim();
+  if (!normalizedQuery) {
+    return null;
+  }
+
+  const candidates = await resolveSearchCandidates(normalizedQuery, requestedBy, {
+    limit: SEARCH_TRACK_PACK_SIZE,
+  }).catch(() => []);
+
+  return packSearchTracks(candidates, normalizedQuery);
+}
+
+async function resolveTracksFromMetadataItems(items, requestedBy) {
+  const sourceItems = Array.isArray(items) ? items.slice(0, MAX_PLAYLIST_ITEMS) : [];
+  const resolvedTracks = [];
+
+  for (const item of sourceItems) {
+    const title = String(item?.title || "").trim();
+    if (!title) {
+      continue;
+    }
+
+    const artist = String(item?.artist || "").trim();
+    const query = buildQueryFromArtistTitle(artist, title);
+    const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
+    if (resolvedTrack) {
+      resolvedTracks.push(resolvedTrack);
+    }
+
+    if (resolvedTracks.length >= MAX_PLAYLIST_ITEMS) {
+      break;
+    }
+  }
+
+  return resolvedTracks;
+}
+
+async function resolveSpotifyUrl(url, requestedBy) {
+  if (!HAS_SPOTIFY_AUTH) {
+    return null;
+  }
+
+  const type = play.sp_validate(url);
+  if (!type || type === "search") {
+    return null;
+  }
+
+  const spotify = await play.spotify(url);
+  if (!spotify) {
+    return null;
+  }
+
+  if (spotify.type === "track") {
+    const query = buildQueryFromArtistTitle(joinArtists(spotify.artists), spotify.name);
+    const track = await resolveTrackByMetadataQuery(query, requestedBy);
+    if (!track) {
+      throw new Error("Не удалось подобрать источник по Spotify-треку.");
+    }
+
+    return {
+      tracks: [track],
+      kind: "spotify_track",
+      title: spotify.name || "Spotify track",
+    };
+  }
+
+  const spotifyTracks = await spotify.all_tracks();
+  const metadata = spotifyTracks.map((item) => ({
+    title: item?.name || "",
+    artist: joinArtists(item?.artists),
+  }));
+
+  const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+  if (tracks.length === 0) {
+    throw new Error("Не удалось сопоставить Spotify-треки с YouTube-источниками.");
+  }
+
+  return {
+    tracks,
+    kind: spotify.type === "playlist" ? "spotify_playlist" : "spotify_album",
+    title: spotify.name || "Spotify",
+  };
+}
+
+async function resolveDeezerUrl(url, requestedBy) {
+  const type = await play.dz_validate(url).catch(() => false);
+  if (!type || type === "search") {
+    return null;
+  }
+
+  const deezer = await play.deezer(url);
+  if (!deezer) {
+    return null;
+  }
+
+  if (deezer.type === "track") {
+    const query = buildQueryFromArtistTitle(deezer.artist?.name, deezer.title);
+    const track = await resolveTrackByMetadataQuery(query, requestedBy);
+    if (!track) {
+      throw new Error("Не удалось подобрать источник по Deezer-треку.");
+    }
+
+    return {
+      tracks: [track],
+      kind: "deezer_track",
+      title: deezer.title || "Deezer track",
+    };
+  }
+
+  const deezerTracks = await deezer.all_tracks();
+  const metadata = deezerTracks.map((item) => ({
+    title: item?.title || "",
+    artist: item?.artist?.name || "",
+  }));
+
+  const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+  if (tracks.length === 0) {
+    throw new Error("Не удалось сопоставить Deezer-треки с YouTube-источниками.");
+  }
+
+  return {
+    tracks,
+    kind: deezer.type === "playlist" ? "deezer_playlist" : "deezer_album",
+    title: deezer.title || "Deezer",
+  };
+}
+
+async function fetchExternalPageMetadata(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      },
+    });
+
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("text/html")) {
+      return null;
+    }
+
+    const html = await response.text();
+    const ogTitle = extractMetaContent(html, "property", "og:title");
+    const twitterTitle = extractMetaContent(html, "name", "twitter:title");
+    const siteName = extractMetaContent(html, "property", "og:site_name");
+    const titleTag = extractTitleTag(html);
+
+    const finalUrl = response.url || url;
+    const hostName = (() => {
+      try {
+        return new URL(finalUrl).hostname;
+      } catch {
+        return "";
+      }
+    })();
+
+    const title = ogTitle || twitterTitle || titleTag;
+    return {
+      title,
+      siteName,
+      hostName,
+      finalUrl,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveGenericExternalUrl(url, requestedBy) {
+  const pageMeta = await fetchExternalPageMetadata(url);
+  if (!pageMeta?.title) {
+    return null;
+  }
+
+  const cleanedTitle = cleanExternalTitle(pageMeta.title, pageMeta.siteName);
+  if (!cleanedTitle) {
+    return null;
+  }
+
+  const track = await resolveTrackByMetadataQuery(cleanedTitle, requestedBy);
+  if (!track) {
+    return null;
+  }
+
+  return {
+    tracks: [track],
+    kind: "external_url",
+    title: pageMeta.hostName || "External link",
+  };
+}
+
 async function resolveSearchCandidates(query, requestedBy, options = {}) {
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
   const normalizedQuery = normalizeInput(query);
@@ -583,7 +883,28 @@ async function resolveTracks(query, requestedBy) {
       return soundCloudResolved;
     }
 
-    throw new Error("Эта ссылка пока не поддерживается. Используй YouTube/SoundCloud.");
+    const spotifyResolved = await resolveSpotifyUrl(input, requestedBy).catch((error) => {
+      console.warn(`[Resolve] Spotify URL fallback (${input}): ${error.message}`);
+      return null;
+    });
+    if (spotifyResolved) {
+      return spotifyResolved;
+    }
+
+    const deezerResolved = await resolveDeezerUrl(input, requestedBy).catch((error) => {
+      console.warn(`[Resolve] Deezer URL fallback (${input}): ${error.message}`);
+      return null;
+    });
+    if (deezerResolved) {
+      return deezerResolved;
+    }
+
+    const externalResolved = await resolveGenericExternalUrl(input, requestedBy);
+    if (externalResolved) {
+      return externalResolved;
+    }
+
+    throw new Error("Ссылка не поддерживается или недоступна без авторизации. Используй YouTube/SoundCloud/Spotify/Deezer либо публичную ссылку.");
   }
 
   return resolveFromSearch(input, requestedBy);

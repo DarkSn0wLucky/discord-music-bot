@@ -1,7 +1,15 @@
 const fs = require("fs");
 const path = require("path");
 const play = require("play-dl");
-const { SOUNDCLOUD_CLIENT_ID, YOUTUBE_COOKIE, YTDLP_COOKIES_PATH } = require("../config");
+const {
+  SOUNDCLOUD_CLIENT_ID,
+  SPOTIFY_CLIENT_ID,
+  SPOTIFY_CLIENT_SECRET,
+  SPOTIFY_REFRESH_TOKEN,
+  SPOTIFY_MARKET,
+  YOUTUBE_COOKIE,
+  YTDLP_COOKIES_PATH,
+} = require("../config");
 
 function resolveCookiesFilePath() {
   const configuredPath = String(YTDLP_COOKIES_PATH || "").trim();
@@ -84,6 +92,7 @@ function resolveYoutubeCookie() {
 async function initSourceAuth() {
   const tokenPayload = {};
   let soundCloudReady = false;
+  let spotifyReady = false;
   const youtubeCookie = resolveYoutubeCookie();
 
   if (youtubeCookie?.value) {
@@ -103,6 +112,16 @@ async function initSourceAuth() {
     }
   }
 
+  if (SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN) {
+    tokenPayload.spotify = {
+      client_id: SPOTIFY_CLIENT_ID,
+      client_secret: SPOTIFY_CLIENT_SECRET,
+      refresh_token: SPOTIFY_REFRESH_TOKEN,
+      market: SPOTIFY_MARKET || "US",
+    };
+    spotifyReady = true;
+  }
+
   if (Object.keys(tokenPayload).length > 0) {
     await play.setToken(tokenPayload);
   }
@@ -113,6 +132,7 @@ async function initSourceAuth() {
 
   return {
     soundCloudReady,
+    spotifyReady,
     youtubeCookieReady: Boolean(youtubeCookie?.value),
     youtubeCookieSource: youtubeCookie?.source || "none",
   };
