@@ -3,9 +3,67 @@ const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY } = require("../config");
 
 const SEARCH_RESULTS_LIMIT = 8;
 const SEARCH_TRACK_PACK_SIZE = 4;
+const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
+
+const QUERY_STOPWORDS = new Set([
+  "official",
+  "video",
+  "music",
+  "audio",
+  "lyrics",
+  "lyric",
+  "clip",
+  "clips",
+  "mv",
+  "hd",
+  "hq",
+  "feat",
+  "ft",
+  "version",
+  "ver",
+  "песня",
+  "песню",
+  "песни",
+  "трек",
+  "музыка",
+]);
+
+const EXTRA_VERSION_KEYWORDS = new Set([
+  "remix",
+  "live",
+  "karaoke",
+  "cover",
+  "speed",
+  "speedup",
+  "nightcore",
+  "reverb",
+  "edit",
+  "instrumental",
+  "demo",
+  "concert",
+  "slowed",
+  "slowedreverb",
+  "акустика",
+  "акустический",
+  "концерт",
+  "караоке",
+  "кавер",
+  "ремикс",
+  "версия",
+]);
 
 function normalizeInput(raw) {
   return raw.trim().replace(/^<(.+)>$/g, "$1");
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .normalize("NFKC")
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isUrl(value) {
@@ -37,6 +95,7 @@ function toYouTubeTrack(video, requestedBy) {
     url: video.url,
     source: "YouTube",
     author: video.channel?.name || video.channel?.title || "YouTube",
+    views: Number(video.views) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
     thumbnail: youtubeThumb(video),
@@ -54,6 +113,7 @@ function toSoundCloudTrack(track, requestedBy) {
     url: track.permalink || track.url,
     source: "SoundCloud",
     author: track.user?.name || "SoundCloud",
+    views: Number(track.views) || 0,
     durationSec,
     durationMs,
     thumbnail: track.thumbnail || null,
@@ -105,7 +165,7 @@ async function searchYoutubeByApi(query, options = {}) {
     .map((id) => `https://www.youtube.com/watch?v=${id}`);
 }
 
-function dedupeTracksByUrl(tracks, limit) {
+function dedupeTracksByUrl(tracks, limit = Number.POSITIVE_INFINITY) {
   const seenUrls = new Set();
   const unique = [];
 
@@ -125,6 +185,147 @@ function dedupeTracksByUrl(tracks, limit) {
   return unique;
 }
 
+function buildQueryMeta(query) {
+  const normalizedQuery = normalizeText(query);
+  const rawTokens = normalizedQuery.split(" ").filter(Boolean);
+  const meaningfulTokens = rawTokens.filter((token) => token.length > 1 && !QUERY_STOPWORDS.has(token));
+  const tokens = [...new Set(meaningfulTokens.length > 0 ? meaningfulTokens : rawTokens)];
+
+  return {
+    normalizedQuery,
+    tokens,
+    tokenSet: new Set(tokens),
+  };
+}
+
+function tokenMatches(queryToken, titleToken) {
+  if (!queryToken || !titleToken) {
+    return false;
+  }
+
+  if (queryToken === titleToken) {
+    return true;
+  }
+
+  const minPrefixLength = 4;
+  return (
+    (queryToken.length >= minPrefixLength && titleToken.startsWith(queryToken)) ||
+    (titleToken.length >= minPrefixLength && queryToken.startsWith(titleToken))
+  );
+}
+
+function strictCoverageThreshold(tokenCount) {
+  if (tokenCount <= 1) {
+    return 1;
+  }
+
+  if (tokenCount === 2) {
+    return 0.5;
+  }
+
+  if (tokenCount === 3) {
+    return 2 / 3;
+  }
+
+  return 0.6;
+}
+
+function scoreCandidate(track, queryMeta) {
+  const haystack = `${track?.title || ""} ${track?.author || ""}`;
+  const normalizedHaystack = normalizeText(haystack);
+  const haystackTokens = normalizedHaystack.split(" ").filter(Boolean);
+  const haystackTokenSet = new Set(haystackTokens);
+
+  const matchedTokens = queryMeta.tokens.filter((token) => {
+    for (const haystackToken of haystackTokenSet) {
+      if (tokenMatches(token, haystackToken)) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  const matchCount = matchedTokens.length;
+  const tokenCoverage = queryMeta.tokens.length > 0 ? matchCount / queryMeta.tokens.length : 0;
+  const containsFullQuery = Boolean(queryMeta.normalizedQuery) && normalizedHaystack.includes(queryMeta.normalizedQuery);
+  const startsWithQuery = Boolean(queryMeta.normalizedQuery) && normalizedHaystack.startsWith(queryMeta.normalizedQuery);
+  const orderedPhraseMatch = queryMeta.tokens.length > 1 && normalizedHaystack.includes(queryMeta.tokens.join(" "));
+
+  let extraVersionPenalty = 0;
+  for (const keyword of EXTRA_VERSION_KEYWORDS) {
+    if (haystackTokenSet.has(keyword) && !queryMeta.tokenSet.has(keyword)) {
+      extraVersionPenalty += 1;
+    }
+  }
+
+  const views = Number(track?.views) || 0;
+  const durationSec = Number(track?.durationSec) || 0;
+  let score = 0;
+
+  score += tokenCoverage * 120;
+  score += matchCount * 14;
+
+  if (containsFullQuery) {
+    score += 70;
+  }
+  if (startsWithQuery) {
+    score += 25;
+  }
+  if (orderedPhraseMatch) {
+    score += 18;
+  }
+
+  score += views > 0 ? Math.log10(views + 1) * 5 : 0;
+  score -= extraVersionPenalty * 9;
+
+  const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("концерт");
+  if (!queryHintsLongVersion && durationSec > 11 * 60) {
+    score -= 6;
+  }
+  if (durationSec > 0 && durationSec < 50) {
+    score -= 6;
+  }
+
+  const strictMatch =
+    containsFullQuery || startsWithQuery || tokenCoverage >= strictCoverageThreshold(queryMeta.tokens.length);
+
+  return {
+    track,
+    score,
+    strictMatch,
+    tokenCoverage,
+    matchCount,
+    views,
+  };
+}
+
+function rankCandidatesByQuery(candidates, query) {
+  const uniqueCandidates = dedupeTracksByUrl(candidates);
+  if (uniqueCandidates.length <= 1) {
+    return uniqueCandidates;
+  }
+
+  const queryMeta = buildQueryMeta(query);
+  const scored = uniqueCandidates.map((track) => scoreCandidate(track, queryMeta));
+  const relevant = scored.filter((entry) => entry.matchCount > 0 || entry.strictMatch);
+  const pool = relevant.length > 0 ? relevant : scored;
+
+  pool.sort((left, right) => {
+    if (left.strictMatch !== right.strictMatch) {
+      return left.strictMatch ? -1 : 1;
+    }
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    if (right.tokenCoverage !== left.tokenCoverage) {
+      return right.tokenCoverage - left.tokenCoverage;
+    }
+    return right.views - left.views;
+  });
+
+  return pool.map((entry) => entry.track);
+}
+
 async function resolveSearchCandidates(query, requestedBy, options = {}) {
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
   const normalizedQuery = normalizeInput(query);
@@ -138,50 +339,72 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
   }
 
   const rawCandidates = [];
-  const targetSearchSize = Math.max(SEARCH_RESULTS_LIMIT, limit * 2);
+  const targetSearchSize = Math.max(SEARCH_RESULTS_LIMIT * 2, limit * SEARCH_CANDIDATE_POOL_MULTIPLIER);
 
   try {
-    const results = await play.search(normalizedQuery, {
+    const strictResults = await play.search(normalizedQuery, {
       source: { youtube: "video" },
       limit: targetSearchSize,
+      fuzzy: false,
     });
 
-    const fromSearch = (results || [])
+    const fromStrict = (strictResults || [])
       .map((video) => toYouTubeTrack(video, requestedBy))
       .filter((track) => track?.url);
 
-    rawCandidates.push(...fromSearch);
+    rawCandidates.push(...fromStrict);
+
+    if (fromStrict.length < limit) {
+      const fuzzyResults = await play.search(normalizedQuery, {
+        source: { youtube: "video" },
+        limit: targetSearchSize,
+        fuzzy: true,
+      });
+
+      const fromFuzzy = (fuzzyResults || [])
+        .map((video) => toYouTubeTrack(video, requestedBy))
+        .filter((track) => track?.url);
+
+      rawCandidates.push(...fromFuzzy);
+    }
   } catch (error) {
     console.warn(`[Resolve] Ошибка play.search "${normalizedQuery}": ${error.message}`);
   }
 
-  const uniqueCandidates = dedupeTracksByUrl(rawCandidates, limit);
-  if (uniqueCandidates.length >= limit) {
-    return uniqueCandidates;
-  }
+  const uniqueCandidates = dedupeTracksByUrl(rawCandidates);
+  const seenUrls = new Set(uniqueCandidates.map((track) => track.url));
 
-  const apiUrls = await searchYoutubeByApi(normalizedQuery, {
-    maxResults: targetSearchSize,
-    order: "viewCount",
-  }).catch(() => []);
+  if (uniqueCandidates.length < limit) {
+    const apiUrls = await searchYoutubeByApi(normalizedQuery, {
+      maxResults: targetSearchSize,
+      order: "viewCount",
+    }).catch(() => []);
 
-  for (const url of apiUrls) {
-    if (uniqueCandidates.some((track) => track.url === url)) {
-      continue;
-    }
-
-    try {
-      const track = await resolveCandidateVideo(url, requestedBy);
-      uniqueCandidates.push(track);
-      if (uniqueCandidates.length >= limit) {
-        break;
+    for (const url of apiUrls) {
+      if (seenUrls.has(url)) {
+        continue;
       }
-    } catch (error) {
-      console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
+
+      try {
+        const track = await resolveCandidateVideo(url, requestedBy);
+        if (!track?.url || seenUrls.has(track.url)) {
+          continue;
+        }
+
+        uniqueCandidates.push(track);
+        seenUrls.add(track.url);
+
+        if (uniqueCandidates.length >= targetSearchSize) {
+          break;
+        }
+      } catch (error) {
+        console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
+      }
     }
   }
 
-  return uniqueCandidates;
+  const rankedCandidates = rankCandidatesByQuery(uniqueCandidates, normalizedQuery);
+  return rankedCandidates.slice(0, limit);
 }
 
 async function resolveYoutubeUrl(url, requestedBy) {
@@ -300,3 +523,4 @@ module.exports = {
   resolveTracks,
   resolveSearchCandidates,
 };
+
