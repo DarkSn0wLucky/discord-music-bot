@@ -74,16 +74,20 @@ function packSearchTracks(rawTracks, query) {
   return first;
 }
 
-async function searchYoutubeByApi(query) {
+async function searchYoutubeByApi(query, options = {}) {
   if (!YOUTUBE_API_KEY) {
     return [];
   }
+
+  const maxResults = Math.max(1, Math.min(50, Number(options.maxResults) || SEARCH_RESULTS_LIMIT));
+  const order = options.order || "relevance";
 
   const params = new URLSearchParams({
     part: "snippet",
     q: query,
     type: "video",
-    maxResults: String(SEARCH_RESULTS_LIMIT),
+    maxResults: String(maxResults),
+    order,
     key: YOUTUBE_API_KEY,
   });
 
@@ -99,6 +103,85 @@ async function searchYoutubeByApi(query) {
     .map((item) => item?.id?.videoId)
     .filter(Boolean)
     .map((id) => `https://www.youtube.com/watch?v=${id}`);
+}
+
+function dedupeTracksByUrl(tracks, limit) {
+  const seenUrls = new Set();
+  const unique = [];
+
+  for (const track of tracks) {
+    if (!track?.url || seenUrls.has(track.url)) {
+      continue;
+    }
+
+    seenUrls.add(track.url);
+    unique.push(track);
+
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+
+  return unique;
+}
+
+async function resolveSearchCandidates(query, requestedBy, options = {}) {
+  const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
+  const normalizedQuery = normalizeInput(query);
+
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  if (isUrl(normalizedQuery)) {
+    throw new Error("Для меню выбора нужен текстовый запрос, а не ссылка.");
+  }
+
+  const rawCandidates = [];
+  const targetSearchSize = Math.max(SEARCH_RESULTS_LIMIT, limit * 2);
+
+  try {
+    const results = await play.search(normalizedQuery, {
+      source: { youtube: "video" },
+      limit: targetSearchSize,
+    });
+
+    const fromSearch = (results || [])
+      .map((video) => toYouTubeTrack(video, requestedBy))
+      .filter((track) => track?.url);
+
+    rawCandidates.push(...fromSearch);
+  } catch (error) {
+    console.warn(`[Resolve] Ошибка play.search "${normalizedQuery}": ${error.message}`);
+  }
+
+  const uniqueCandidates = dedupeTracksByUrl(rawCandidates, limit);
+  if (uniqueCandidates.length >= limit) {
+    return uniqueCandidates;
+  }
+
+  const apiUrls = await searchYoutubeByApi(normalizedQuery, {
+    maxResults: targetSearchSize,
+    order: "viewCount",
+  }).catch(() => []);
+
+  for (const url of apiUrls) {
+    if (uniqueCandidates.some((track) => track.url === url)) {
+      continue;
+    }
+
+    try {
+      const track = await resolveCandidateVideo(url, requestedBy);
+      uniqueCandidates.push(track);
+      if (uniqueCandidates.length >= limit) {
+        break;
+      }
+    } catch (error) {
+      console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
+    }
+  }
+
+  return uniqueCandidates;
 }
 
 async function resolveYoutubeUrl(url, requestedBy) {
@@ -170,55 +253,20 @@ async function resolveCandidateVideo(url, requestedBy) {
 async function resolveFromSearch(query, requestedBy) {
   console.log(`[Resolve] Поиск по тексту: "${query}"`);
 
-  try {
-    const results = await play.search(query, {
-      source: { youtube: "video" },
-      limit: SEARCH_RESULTS_LIMIT,
-    });
+  const candidates = await resolveSearchCandidates(query, requestedBy, {
+    limit: SEARCH_TRACK_PACK_SIZE,
+  }).catch((error) => {
+    console.error(`[Resolve] Ошибка поиска "${query}":`, error.message);
+    return [];
+  });
 
-    const tracksFromSearch = (results || [])
-      .map((video) => toYouTubeTrack(video, requestedBy))
-      .filter((track) => track?.url);
-
-    const packedTrack = packSearchTracks(tracksFromSearch, query);
-    if (packedTrack) {
-      console.log(
-        `[Resolve] Выбран кандидат из play.search: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`
-      );
-      return {
-        tracks: [packedTrack],
-        kind: "youtube_search",
-      };
-    }
-  } catch (error) {
-    console.warn(`[Resolve] Ошибка play.search "${query}": ${error.message}`);
-  }
-
-  const apiUrls = await searchYoutubeByApi(query).catch(() => []);
-  if (Array.isArray(apiUrls) && apiUrls.length > 0) {
-    const recoveredTracks = [];
-
-    for (const url of apiUrls) {
-      try {
-        const track = await resolveCandidateVideo(url, requestedBy);
-        recoveredTracks.push(track);
-
-        if (recoveredTracks.length >= SEARCH_TRACK_PACK_SIZE) {
-          break;
-        }
-      } catch (error) {
-        console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error.message}`);
-      }
-    }
-
-    const packedTrack = packSearchTracks(recoveredTracks, query);
-    if (packedTrack) {
-      console.log(`[Resolve] Выбран API-кандидат: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`);
-      return {
-        tracks: [packedTrack],
-        kind: "youtube_search_api",
-      };
-    }
+  const packedTrack = packSearchTracks(candidates, query);
+  if (packedTrack) {
+    console.log(`[Resolve] Выбран кандидат из поиска: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`);
+    return {
+      tracks: [packedTrack],
+      kind: "youtube_search",
+    };
   }
 
   throw new Error("Не удалось найти трек по запросу.");
@@ -250,4 +298,5 @@ async function resolveTracks(query, requestedBy) {
 
 module.exports = {
   resolveTracks,
+  resolveSearchCandidates,
 };

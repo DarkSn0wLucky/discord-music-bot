@@ -1,8 +1,8 @@
-const { MessageFlags } = require("discord.js");
+const { ActionRowBuilder, ComponentType, MessageFlags, StringSelectMenuBuilder } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
-const { resolveTracks } = require("../music/resolveTrack");
+const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrack");
 const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
-const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
+const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
@@ -21,6 +21,96 @@ function enqueuePlayRequest(guildId, task) {
 
   playRequestQueueByGuild.set(guildId, next);
   return next;
+}
+
+function isUrlLike(value) {
+  try {
+    new URL(String(value || "").trim());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildTrackPickerRow(customId, tracks) {
+  const options = tracks.slice(0, 5).map((track, index) => ({
+    label: truncate(safeLinkText(track.title), 95),
+    description: truncate(`${track.author} • ${formatDuration(track.durationSec)}`, 95),
+    value: String(index),
+  }));
+
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(customId)
+      .setPlaceholder("Выбери трек из похожих вариантов")
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(options)
+  );
+}
+
+async function pickTrackFromMenu(interaction, query, tracks) {
+  if (!tracks.length) {
+    return null;
+  }
+
+  const customId = `music:pick:${interaction.id}`;
+  const pickerRow = buildTrackPickerRow(customId, tracks);
+
+  const promptMessage = await interaction.editReply({
+    embeds: [
+      buildActionEmbed(
+        "Выбор трека",
+        `Запрос: **${safeLinkText(query)}**\nВыбери один из 5 похожих популярных треков (таймаут 30 сек).`
+      ),
+    ],
+    components: [pickerRow],
+  });
+
+  try {
+    const selected = await promptMessage.awaitMessageComponent({
+      componentType: ComponentType.StringSelect,
+      time: 30_000,
+      filter: async (componentInteraction) => {
+        if (componentInteraction.customId !== customId) {
+          return false;
+        }
+
+        if (componentInteraction.user.id !== interaction.user.id) {
+          await componentInteraction
+            .reply({
+              content: `Выбор доступен только <@${interaction.user.id}>.`,
+              ...EPHEMERAL_REPLY,
+            })
+            .catch(() => null);
+          return false;
+        }
+
+        return true;
+      },
+    });
+
+    const selectedIndex = Number(selected.values?.[0] ?? -1);
+    const track = tracks[selectedIndex] || tracks[0];
+    await selected.update({
+      embeds: [buildActionEmbed("Выбрано", `[${safeLinkText(track.title)}](${track.url}) • ${formatDuration(track.durationSec)}`)],
+      components: [],
+    });
+
+    return track;
+  } catch {
+    const fallbackTrack = tracks[0];
+    await interaction.editReply({
+      embeds: [
+        buildActionEmbed(
+          "Выбор по умолчанию",
+          `Время выбора вышло, запускаю первый вариант:\n[${safeLinkText(fallbackTrack.title)}](${fallbackTrack.url})`
+        ),
+      ],
+      components: [],
+    });
+    return fallbackTrack;
+  }
 }
 
 function normalizeChannelName(value) {
@@ -146,9 +236,31 @@ async function handlePlay(interaction, manager) {
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
       const query = interaction.options.getString("query", true);
-      const resolved = await resolveTracks(query, interaction.user);
+      const isDirectUrl = isUrlLike(query);
+      let tracksToAdd = [];
 
-      if (!resolved.tracks.length) {
+      if (isDirectUrl) {
+        const resolved = await resolveTracks(query, interaction.user);
+        tracksToAdd = resolved.tracks;
+      } else {
+        const candidates = await resolveSearchCandidates(query, interaction.user, { limit: 5 });
+        if (!candidates.length) {
+          await interaction.editReply("Ничего не найдено по запросу.");
+          return;
+        }
+
+        const selectedTrack = await pickTrackFromMenu(interaction, query, candidates);
+        if (!selectedTrack) {
+          await interaction.editReply("Не удалось выбрать трек.");
+          return;
+        }
+
+        selectedTrack.searchQuery = query;
+        selectedTrack.fallbackTracks = candidates.filter((candidate) => candidate.url !== selectedTrack.url).slice(0, 4);
+        tracksToAdd = [selectedTrack];
+      }
+
+      if (!tracksToAdd.length) {
         await interaction.editReply("Ничего не найдено по запросу.");
         return;
       }
@@ -158,13 +270,13 @@ async function handlePlay(interaction, manager) {
       await player.connect(memberVoice);
       const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
 
-      const { accepted, dropped } = player.addTracks(resolved.tracks);
+      const { accepted, dropped } = player.addTracks(tracksToAdd);
       if (accepted === 0) {
         await interaction.editReply("Очередь заполнена, добавить новые треки пока нельзя.");
         return;
       }
 
-      const first = resolved.tracks[0];
+      const first = tracksToAdd[0];
       const summary =
         accepted === 1
           ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
