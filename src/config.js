@@ -26,7 +26,7 @@ module.exports = {
   YOUTUBE_COOKIE: process.env.YOUTUBE_COOKIE || "",
   SOUNDCLOUD_CLIENT_ID: process.env.SOUNDCLOUD_CLIENT_ID || "",
   YTDLP_COOKIES_PATH: process.env.YTDLP_COOKIES_PATH || "cookies.txt",
-  EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#ff5ca8",
+  EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
   MAX_QUEUE_SIZE: asNumber(process.env.MAX_QUEUE_SIZE, 150),
   MAX_PLAYLIST_ITEMS: asNumber(process.env.MAX_PLAYLIST_ITEMS, 50),
   AUTO_DISCONNECT_MS: asNumber(process.env.AUTO_DISCONNECT_MS, 180_000),

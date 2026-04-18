@@ -18,10 +18,10 @@ function buildPlayerEmbed(player) {
       .setDescription("Очередь пуста. Добавь трек через `/play <ссылка или запрос>`")
       .addFields(
         { name: "Статус", value: "Ожидание", inline: true },
-        { name: "Луп", value: loopLabel(player.loopMode), inline: true },
+        { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
         { name: "В очереди", value: String(player.queue.length), inline: true }
       )
-      .setFooter({ text: "Минималистичный pink mode" });
+      .setFooter({ text: "Минималистичный music mode" });
   }
 
   const track = player.currentTrack;
@@ -46,7 +46,7 @@ function buildPlayerEmbed(player) {
       { name: "Источник", value: track.source, inline: true },
       { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
       { name: "Длина очереди", value: String(player.queue.length), inline: true },
-      { name: "⏳TIME⏳", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
+      { name: "TIME", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
       { name: "Дальше в очереди", value: queuePreview }
     )
     .setFooter({ text: `Запросил: ${track.requestedByTag}` });
@@ -61,7 +61,7 @@ function buildPlayerEmbed(player) {
 function buildControlsRow(player) {
   const idle = !player.currentTrack && player.queue.length === 0;
   const pauseLabel = player.isPaused() ? "Продолжить" : "Пауза";
-  const loopButtonLabel = `Луп: ${loopLabel(player.loopMode)}`;
+  const loopButtonLabel = `Цикл: ${loopLabel(player.loopMode)}`;
 
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -111,15 +111,17 @@ function buildQueueEmbed(player) {
     .setTitle("Очередь")
     .setDescription(`**Сейчас:** ${current}`)
     .addFields({ name: `Треков в очереди: ${player.queue.length}`, value: queueText })
-    .setFooter({ text: `Луп: ${loopLabel(player.loopMode)}` });
+    .setFooter({ text: `Цикл: ${loopLabel(player.loopMode)}` });
 }
 
 function buildActionEmbed(title, description) {
-  return new EmbedBuilder()
-    .setColor(EMBED_COLOR_HEX)
-    .setTitle(title)
-    .setDescription(description)
-    .setTimestamp(new Date());
+  const embed = new EmbedBuilder().setColor(EMBED_COLOR_HEX).setDescription(description).setTimestamp(new Date());
+
+  if (title) {
+    embed.setTitle(title);
+  }
+
+  return embed;
 }
 
 module.exports = {
@@ -129,4 +131,3 @@ module.exports = {
   buildQueueEmbed,
   buildActionEmbed,
 };
-

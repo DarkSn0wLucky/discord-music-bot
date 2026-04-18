@@ -1,7 +1,5 @@
-const { EmbedBuilder } = require("discord.js");
-const { EMBED_COLOR_HEX } = require("../config");
 const { resolveTracks } = require("../music/resolveTrack");
-const { BUTTON_IDS, buildPlayerEmbed } = require("../ui/panel");
+const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
 
 function isSameVoiceWithBot(interaction, player) {
@@ -48,7 +46,7 @@ async function handlePlay(interaction, manager) {
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply();
 
   try {
     const query = interaction.options.getString("query", true);
@@ -75,12 +73,13 @@ async function handlePlay(interaction, manager) {
         ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
         : `Добавлено треков: ${accepted}`;
 
-    await player.sendAction("Добавлено в очередь", summary);
     await player.refreshPanel();
     await player.playIfIdle();
 
     const dropHint = dropped > 0 ? `\nНе добавлено из-за лимита очереди: ${dropped}` : "";
-    await interaction.editReply(`Готово. ${summary}${dropHint}`);
+    await interaction.editReply({
+      embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
+    });
   } catch (error) {
     console.error("[Command:/play]", error);
     await interaction.editReply(`Ошибка: ${error.message}`);
@@ -100,7 +99,7 @@ async function handleSkip(interaction, manager) {
   }
 
   const result = await player.skip();
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.reply({ content: result.message });
 }
 
 async function handlePause(interaction, manager) {
@@ -116,7 +115,7 @@ async function handlePause(interaction, manager) {
   }
 
   const result = await player.pause();
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.reply({ content: result.message });
 }
 
 async function handleResume(interaction, manager) {
@@ -132,7 +131,7 @@ async function handleResume(interaction, manager) {
   }
 
   const result = await player.resume();
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.reply({ content: result.message });
 }
 
 async function handleStop(interaction, manager) {
@@ -148,7 +147,7 @@ async function handleStop(interaction, manager) {
   }
 
   const result = await player.stop();
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.reply({ content: result.message });
 }
 
 async function handleQueue(interaction, manager) {
@@ -158,16 +157,8 @@ async function handleQueue(interaction, manager) {
   }
 
   await interaction.reply({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(EMBED_COLOR_HEX)
-        .setTitle("Очередь")
-        .setDescription(player.queue.length ? `Треков в очереди: ${player.queue.length}` : "Очередь пуста."),
-    ],
-    ephemeral: true,
+    embeds: [buildQueueEmbed(player)],
   });
-
-  await player.sendQueue();
 }
 
 async function handleNowPlaying(interaction, manager) {
@@ -176,7 +167,7 @@ async function handleNowPlaying(interaction, manager) {
     return;
   }
 
-  await interaction.reply({ embeds: [buildPlayerEmbed(player)], ephemeral: true });
+  await interaction.reply({ embeds: [buildPlayerEmbed(player)] });
 }
 
 async function handleShuffle(interaction, manager) {
@@ -192,10 +183,7 @@ async function handleShuffle(interaction, manager) {
   }
 
   const result = await player.shuffle();
-  if (result.ok) {
-    await player.sendAction("Шафл", "Очередь перемешана.");
-  }
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.reply({ content: result.message });
 }
 
 async function handleLoop(interaction, manager) {
@@ -217,8 +205,7 @@ async function handleLoop(interaction, manager) {
     return;
   }
 
-  await player.sendAction("Loop", `Новый режим: ${loopLabel(mode)}.`);
-  await interaction.reply({ content: `Loop: ${loopLabel(mode)}.`, ephemeral: true });
+  await interaction.reply({ content: `Цикл: ${loopLabel(mode)}.` });
 }
 
 async function handleButton(interaction, manager) {
@@ -234,44 +221,46 @@ async function handleButton(interaction, manager) {
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferUpdate();
 
   if (interaction.customId === BUTTON_IDS.toggle) {
     const result = await player.togglePause();
-    await player.sendAction("Переключение", result.message);
-    await interaction.editReply(result.message);
+    if (!result.ok) {
+      await interaction.followUp({ content: result.message, ephemeral: true });
+    }
     return;
   }
 
   if (interaction.customId === BUTTON_IDS.skip) {
     const result = await player.skip();
-    await interaction.editReply(result.message);
+    if (!result.ok) {
+      await interaction.followUp({ content: result.message, ephemeral: true });
+    }
     return;
   }
 
   if (interaction.customId === BUTTON_IDS.stop) {
     const result = await player.stop();
-    await interaction.editReply(result.message);
+    if (!result.ok) {
+      await interaction.followUp({ content: result.message, ephemeral: true });
+    }
     return;
   }
 
   if (interaction.customId === BUTTON_IDS.shuffle) {
     const result = await player.shuffle();
-    if (result.ok) {
-      await player.sendAction("Шафл", "Очередь перемешана кнопкой.");
+    if (!result.ok) {
+      await interaction.followUp({ content: result.message, ephemeral: true });
     }
-    await interaction.editReply(result.message);
     return;
   }
 
   if (interaction.customId === BUTTON_IDS.loop) {
-    const mode = await player.cycleLoopMode();
-    await player.sendAction("Loop", `Новый режим: ${loopLabel(mode)}.`);
-    await interaction.editReply(`Loop: ${loopLabel(mode)}.`);
+    await player.cycleLoopMode();
     return;
   }
 
-  await interaction.editReply("Неизвестная кнопка.");
+  await interaction.followUp({ content: "Неизвестная кнопка.", ephemeral: true });
 }
 
 async function handleChatInput(interaction, manager) {
@@ -327,4 +316,3 @@ module.exports = {
   handleChatInput,
   handleButton,
 };
-

@@ -1,5 +1,10 @@
 const play = require("play-dl");
-const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY } = require("../config");
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const { MAX_PLAYLIST_ITEMS, YOUTUBE_API_KEY, YTDLP_COOKIES_PATH } = require("../config");
+
+const ytDlpProbeCache = new Map();
 
 function normalizeInput(raw) {
   return raw.trim().replace(/^<(.+)>$/g, "$1");
@@ -12,6 +17,88 @@ function isUrl(value) {
   } catch {
     return false;
   }
+}
+
+function resolveYtDlpCookiesPath() {
+  const configuredPath = String(YTDLP_COOKIES_PATH || "").trim();
+  if (!configuredPath) {
+    return null;
+  }
+
+  const absolutePath = path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(process.cwd(), configuredPath);
+
+  return fs.existsSync(absolutePath) ? absolutePath : null;
+}
+
+async function probeYtDlp(url) {
+  const cached = ytDlpProbeCache.get(url);
+  if (cached) {
+    return cached;
+  }
+
+  const probe = await new Promise((resolve) => {
+    const args = ["--simulate", "--skip-download", "--no-playlist", "--no-warnings", "--quiet", "--geo-bypass"];
+    const cookiesPath = resolveYtDlpCookiesPath();
+    if (cookiesPath) {
+      args.push("--cookies", cookiesPath);
+    }
+
+    args.push(url);
+
+    let stderr = "";
+    let done = false;
+
+    const finish = (result) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      resolve(result);
+    };
+
+    const process = spawn("yt-dlp", args, {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+
+    const timeout = setTimeout(() => {
+      process.kill("SIGKILL");
+      finish({ ok: false, reason: "timeout" });
+    }, 12_000);
+
+    process.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    process.on("error", (error) => {
+      clearTimeout(timeout);
+
+      if (error.code === "ENOENT") {
+        // If yt-dlp is not available in this environment, don't block resolver.
+        finish({ ok: true, reason: "yt-dlp-missing" });
+        return;
+      }
+
+      finish({ ok: false, reason: error.message });
+    });
+
+    process.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        finish({ ok: true, reason: "ok" });
+        return;
+      }
+
+      finish({
+        ok: false,
+        reason: stderr.trim() || `yt-dlp exit code ${code}`,
+      });
+    });
+  });
+
+  ytDlpProbeCache.set(url, probe);
+  return probe;
 }
 
 function youtubeThumb(video) {
@@ -68,7 +155,7 @@ async function searchYoutubeByApi(query) {
     part: "snippet",
     q: query,
     type: "video",
-    maxResults: "5",
+    maxResults: "10",
     key: YOUTUBE_API_KEY,
   });
 
@@ -164,6 +251,12 @@ async function resolveFromSearch(query, requestedBy) {
     if (Array.isArray(apiUrls) && apiUrls.length > 0) {
       for (const url of apiUrls) {
         try {
+          const probe = await probeYtDlp(url);
+          if (!probe.ok) {
+            console.warn(`[Resolve] API-кандидат не воспроизводится: ${url} | ${probe.reason}`);
+            continue;
+          }
+
           const resolved = await resolveCandidateVideo(url, requestedBy);
           console.log(`[Resolve] YouTube API выбрал: ${url}`);
           return {
@@ -182,7 +275,7 @@ async function resolveFromSearch(query, requestedBy) {
   try {
     const results = await play.search(query, {
       source: { youtube: "video" },
-      limit: 5,
+      limit: 10,
     });
 
     if (!results || results.length === 0) {
@@ -194,6 +287,12 @@ async function resolveFromSearch(query, requestedBy) {
 
       try {
         console.log(`[Resolve] Проверка кандидата: ${video.title} | ${video.url}`);
+        const probe = await probeYtDlp(video.url);
+        if (!probe.ok) {
+          console.warn(`[Resolve] Кандидат не воспроизводится: ${video.url} | ${probe.reason}`);
+          continue;
+        }
+
         const resolved = await resolveCandidateVideo(video.url, requestedBy);
         return resolved;
       } catch (error) {

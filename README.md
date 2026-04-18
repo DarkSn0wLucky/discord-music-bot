@@ -1,6 +1,6 @@
-# Discord Music Bot (Pink Minimal)
+# Discord Music Bot (Blue Minimal)
 
-Музыкальный Discord-бот с slash-командами, розовым минималистичным интерфейсом и кнопками управления.
+Музыкальный Discord-бот с slash-командами, голубым минималистичным интерфейсом и кнопками управления.
 
 Поддержка:
 - `/play <ссылка или запрос>`
@@ -28,7 +28,7 @@ YOUTUBE_API_KEY=...
 YOUTUBE_COOKIE=
 YTDLP_COOKIES_PATH=cookies.txt
 SOUNDCLOUD_CLIENT_ID=
-EMBED_COLOR_HEX=#ff5ca8
+EMBED_COLOR_HEX=#4da3ff
 MAX_QUEUE_SIZE=150
 MAX_PLAYLIST_ITEMS=50
 AUTO_DISCONNECT_MS=180000
@@ -89,7 +89,7 @@ npm start
 - `Скип`
 - `Стоп`
 - `Шафл`
-- `Луп: Выкл/Трек/Очередь`
+- `Цикл: Выкл/Трек/Очередь`
 
 ## Структура проекта
 

@@ -280,7 +280,7 @@ class GuildMusicPlayer {
           });
 
           await this.refreshPanel();
-          await this.sendAction("Старт", `[${safeLinkText(next.title)}](${next.url})`);
+          await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
           this.startProgressUpdater();
           return;
         } catch (error) {
@@ -375,7 +375,6 @@ class GuildMusicPlayer {
 
     this.forceSkip = true;
     this.player.stop(true);
-    await this.sendAction("Скип", "Текущий трек пропущен.");
     return { ok: true, message: "Трек пропущен." };
   }
 
@@ -389,7 +388,7 @@ class GuildMusicPlayer {
     this.forceSkip = true;
     this.player.stop(true);
 
-    await this.disconnectFromVoice(true);
+    await this.disconnectFromVoice(false);
     await this.clearPanel();
 
     return hadTracks
@@ -523,7 +522,7 @@ class GuildMusicPlayer {
       } else {
         this.stopProgressUpdater();
       }
-    }, 10000);
+    }, 5000);
   }
 
   stopProgressUpdater() {
