@@ -5,6 +5,19 @@ const { formatDuration, loopLabel, safeLinkText } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 
+async function clearDeferredReply(interaction) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await interaction.deleteReply();
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  }
+
+  await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null);
+}
+
 function isSameVoiceWithBot(interaction, player) {
   const memberVoiceId = interaction.member?.voice?.channelId;
   if (!memberVoiceId) {
@@ -49,7 +62,7 @@ async function handlePlay(interaction, manager) {
     return;
   }
 
-  await interaction.deferReply();
+  await interaction.deferReply({ ...EPHEMERAL_REPLY });
 
   try {
     const query = interaction.options.getString("query", true);
@@ -63,14 +76,7 @@ async function handlePlay(interaction, manager) {
     const player = manager.getOrCreate(interaction.guild);
     await player.setTextChannel(interaction.channelId);
     await player.connect(memberVoice);
-    const state = player.player?.state?.status;
-    const hadActivePlayback =
-      state === "playing" ||
-      state === "buffering" ||
-      state === "paused" ||
-      state === "autopaused" ||
-      player.transitionLock ||
-      player.queue.length > 0;
+    const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
 
     const { accepted, dropped } = player.addTracks(resolved.tracks);
     if (accepted === 0) {
@@ -83,13 +89,14 @@ async function handlePlay(interaction, manager) {
       accepted === 1
         ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
         : `Добавлено треков: ${accepted}`;
-    await player.playIfIdle();
+    const startedNow = await player.playIfIdle();
 
     // First play in an empty queue: keep only now-playing action message.
-    if (!hadActivePlayback) {
-      await interaction
-        .deleteReply()
-        .catch(async () => interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null));
+    if (wasQueueEmpty) {
+      if (!startedNow) {
+        await player.refreshPanel();
+      }
+      await clearDeferredReply(interaction);
       return;
     }
 
@@ -164,7 +171,7 @@ async function handleStop(interaction, manager) {
     return;
   }
 
-  await interaction.deferReply();
+  await interaction.deferReply({ ...EPHEMERAL_REPLY });
   const result = await player.stop();
 
   // For successful stop, avoid extra ack message in the channel.

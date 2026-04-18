@@ -1,6 +1,6 @@
 const ffmpegPath = require("ffmpeg-static");
 const path = require("path");
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, GatewayIntentBits, MessageFlags, Partials } = require("discord.js");
 const { assertEnv, DISCORD_TOKEN } = require("./config");
 const { handleButton, handleChatInput } = require("./commands/handlers");
 const { MusicManager } = require("./music/MusicManager");
@@ -44,7 +44,7 @@ client.on("interactionCreate", async (interaction) => {
     console.error("[Interaction error]", error);
     const payload = {
       content: `Ошибка: ${error.message || "неизвестная ошибка"}`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     };
 
     if (interaction.deferred || interaction.replied) {
