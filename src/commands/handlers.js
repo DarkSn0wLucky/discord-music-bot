@@ -32,6 +32,55 @@ function isUrlLike(value) {
   }
 }
 
+function normalizePickerText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .normalize("NFKC")
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildLinkPickerCandidates(primaryTrack, extraCandidates = []) {
+  const merged = [
+    primaryTrack,
+    ...(Array.isArray(primaryTrack?.fallbackTracks) ? primaryTrack.fallbackTracks : []),
+    ...extraCandidates,
+  ];
+
+  const unique = [];
+  const seenUrls = new Set();
+  const seenTitleKeys = new Set();
+
+  for (const track of merged) {
+    if (!track?.url) {
+      continue;
+    }
+
+    if (seenUrls.has(track.url)) {
+      continue;
+    }
+
+    const titleKey = normalizePickerText(track.title);
+    if (titleKey && seenTitleKeys.has(titleKey)) {
+      continue;
+    }
+
+    seenUrls.add(track.url);
+    if (titleKey) {
+      seenTitleKeys.add(titleKey);
+    }
+    unique.push(track);
+
+    if (unique.length >= 5) {
+      break;
+    }
+  }
+
+  return unique;
+}
+
 function buildTrackPickerRows(customIdPrefix, tracks) {
   const topTracks = tracks.slice(0, 5);
   const rows = topTracks.slice(0, 4).map((track, index) =>
@@ -278,20 +327,26 @@ async function handlePlay(interaction, manager) {
         const resolved = await resolveTracks(query, interaction.user);
         tracksToAdd = resolved.tracks;
 
-        if (
-          tracksToAdd.length === 1 &&
-          tracksToAdd[0]?.searchQuery &&
-          Array.isArray(tracksToAdd[0]?.fallbackTracks) &&
-          tracksToAdd[0].fallbackTracks.length > 0
-        ) {
+        if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
           const primaryTrack = tracksToAdd[0];
-          const candidates = [primaryTrack, ...primaryTrack.fallbackTracks].slice(0, 5);
-          const selectedTrack = await pickTrackFromMenu(interaction, primaryTrack.searchQuery, candidates);
-          if (!selectedTrack) return;
+          const extraCandidates = await resolveSearchCandidates(primaryTrack.searchQuery, interaction.user, {
+            limit: 8,
+          }).catch(() => []);
+          const candidates = buildLinkPickerCandidates(primaryTrack, extraCandidates);
 
-          selectedTrack.searchQuery = primaryTrack.searchQuery;
-          selectedTrack.fallbackTracks = candidates.filter((candidate) => candidate.url !== selectedTrack.url).slice(0, 4);
-          tracksToAdd = [selectedTrack];
+          if (candidates.length > 1) {
+            const selectedTrack = await pickTrackFromMenu(interaction, primaryTrack.searchQuery, candidates);
+            if (!selectedTrack) return;
+
+            selectedTrack.searchQuery = primaryTrack.searchQuery;
+            selectedTrack.fallbackTracks = candidates.filter((candidate) => candidate.url !== selectedTrack.url).slice(0, 4);
+            tracksToAdd = [selectedTrack];
+          } else if (candidates.length === 1) {
+            const selectedTrack = candidates[0];
+            selectedTrack.searchQuery = primaryTrack.searchQuery;
+            selectedTrack.fallbackTracks = [];
+            tracksToAdd = [selectedTrack];
+          }
         }
       } else {
         const candidates = await resolveSearchCandidates(query, interaction.user, { limit: 5 });
