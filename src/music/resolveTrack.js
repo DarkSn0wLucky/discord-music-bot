@@ -1186,16 +1186,114 @@ function toVkTrack(entry, requestedBy, fallbackUrl) {
   };
 }
 
+function normalizeYouTubeEntryUrl(entry, fallbackUrl = "") {
+  const candidates = [entry?.webpage_url, entry?.original_url, entry?.url, entry?.id]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  for (const value of candidates) {
+    if (/^https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(value)) {
+      return value;
+    }
+    if (value.startsWith("/watch?")) {
+      return `https://www.youtube.com${value}`;
+    }
+    if (value.startsWith("watch?")) {
+      return `https://www.youtube.com/${value}`;
+    }
+    if (/^[\w-]{11}$/.test(value)) {
+      return `https://www.youtube.com/watch?v=${value}`;
+    }
+  }
+
+  const fallback = String(fallbackUrl || "").trim();
+  return /^https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(fallback) ? fallback : "";
+}
+
+function toYouTubeTrackFromYtDlp(entry, requestedBy, fallbackUrl = "") {
+  const url = normalizeYouTubeEntryUrl(entry, fallbackUrl);
+  if (!url) {
+    return null;
+  }
+
+  const durationSec = Number(entry?.duration) || 0;
+  const thumbnail =
+    entry?.thumbnail ||
+    (Array.isArray(entry?.thumbnails) ? entry.thumbnails[entry.thumbnails.length - 1]?.url : null) ||
+    null;
+
+  return {
+    title: String(entry?.title || "Без названия").trim() || "Без названия",
+    url,
+    source: "YouTube",
+    author: String(entry?.uploader || entry?.channel || entry?.artist || "YouTube").trim() || "YouTube",
+    views: Number(entry?.view_count) || 0,
+    durationSec,
+    durationMs: durationSec > 0 ? durationSec * 1000 : 0,
+    thumbnail,
+    requestedById: requestedBy.id,
+    requestedByTag: requestedBy.tag || requestedBy.username,
+  };
+}
+
+async function resolveYoutubeUrlViaYtDlp(url, requestedBy) {
+  const ytJson = await fetchYtDlpJson(url, {
+    timeoutMs: 30_000,
+    cookiesPath: YTDLP_COOKIES_PATH,
+    flatPlaylist: true,
+    playlistEnd: MAX_PLAYLIST_ITEMS,
+  }).catch(() => null);
+
+  if (!ytJson) {
+    return null;
+  }
+
+  const entries = Array.isArray(ytJson.entries) ? ytJson.entries.filter(Boolean) : [];
+  if (entries.length > 0) {
+    const tracks = entries
+      .slice(0, MAX_PLAYLIST_ITEMS)
+      .map((entry) => toYouTubeTrackFromYtDlp(entry, requestedBy, url))
+      .filter((track) => track?.url);
+
+    if (tracks.length > 0) {
+      return {
+        tracks,
+        kind: "youtube_playlist",
+        title: ytJson.title || "YouTube playlist",
+      };
+    }
+  }
+
+  const singleTrack = toYouTubeTrackFromYtDlp(ytJson, requestedBy, url);
+  if (singleTrack) {
+    return {
+      tracks: [singleTrack],
+      kind: "youtube_video",
+    };
+  }
+
+  return null;
+}
+
 function fetchYtDlpJson(url, options = {}) {
   return new Promise((resolve, reject) => {
+    const flatPlaylist = options.flatPlaylist !== false;
     const args = [
       "--dump-single-json",
-      "--flat-playlist",
       "--no-warnings",
       "--skip-download",
       "--user-agent",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
     ];
+
+    if (flatPlaylist) {
+      args.push("--flat-playlist");
+    }
+
+    const playlistEnd = Number(options.playlistEnd);
+    if (Number.isFinite(playlistEnd) && playlistEnd > 0) {
+      args.push("--playlist-end", String(Math.floor(playlistEnd)));
+    }
 
     const cookiesPath = resolveExistingFilePath(options.cookiesPath);
     if (cookiesPath) {
@@ -1366,6 +1464,26 @@ async function resolveGenericExternalUrl(url, requestedBy) {
   };
 }
 
+async function searchYoutubeViaYtDlp(query, requestedBy, limit) {
+  const amount = Math.max(1, Math.min(15, Number(limit) || 5));
+  const ytSearchQuery = `ytsearch${amount}:${query}`;
+  const json = await fetchYtDlpJson(ytSearchQuery, {
+    timeoutMs: 25_000,
+    cookiesPath: YTDLP_COOKIES_PATH,
+    flatPlaylist: true,
+    playlistEnd: amount,
+  }).catch(() => null);
+
+  if (!json) {
+    return [];
+  }
+
+  const entries = Array.isArray(json.entries) ? json.entries.filter(Boolean) : [];
+  return entries
+    .map((entry) => toYouTubeTrackFromYtDlp(entry, requestedBy))
+    .filter((track) => track?.url);
+}
+
 async function resolveSearchCandidates(query, requestedBy, options = {}) {
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
   const normalizedQuery = normalizeInput(query);
@@ -1380,36 +1498,6 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
 
   const rawCandidates = [];
   const targetSearchSize = Math.max(SEARCH_RESULTS_LIMIT * 2, limit * SEARCH_CANDIDATE_POOL_MULTIPLIER);
-
-  try {
-    const strictResults = await play.search(normalizedQuery, {
-      source: { youtube: "video" },
-      limit: targetSearchSize,
-      fuzzy: false,
-    });
-
-    const fromStrict = (strictResults || [])
-      .map((video) => toYouTubeTrack(video, requestedBy))
-      .filter((track) => track?.url);
-
-    rawCandidates.push(...fromStrict);
-
-    if (fromStrict.length < limit) {
-      const fuzzyResults = await play.search(normalizedQuery, {
-        source: { youtube: "video" },
-        limit: targetSearchSize,
-        fuzzy: true,
-      });
-
-      const fromFuzzy = (fuzzyResults || [])
-        .map((video) => toYouTubeTrack(video, requestedBy))
-        .filter((track) => track?.url);
-
-      rawCandidates.push(...fromFuzzy);
-    }
-  } catch (error) {
-    console.warn(`[Resolve] Ошибка play.search "${normalizedQuery}": ${error.message}`);
-  }
 
   const uniqueCandidates = dedupeTracksByUrl(rawCandidates);
   const seenUrls = new Set(uniqueCandidates.map((track) => track.url));
@@ -1437,6 +1525,20 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
     seenUrls.add(track.url);
   }
 
+  if (uniqueCandidates.length < limit) {
+    const ytDlpCandidates = await searchYoutubeViaYtDlp(normalizedQuery, requestedBy, targetSearchSize);
+    for (const track of ytDlpCandidates) {
+      if (!track?.url || seenUrls.has(track.url)) {
+        continue;
+      }
+      uniqueCandidates.push(track);
+      seenUrls.add(track.url);
+      if (uniqueCandidates.length >= targetSearchSize) {
+        break;
+      }
+    }
+  }
+
   const rankedCandidates = rankCandidatesByQuery(uniqueCandidates, normalizedQuery);
   return rankedCandidates.slice(0, limit);
 }
@@ -1447,30 +1549,12 @@ async function resolveYoutubeUrl(url, requestedBy) {
     return null;
   }
 
-  if (ytType === "video") {
-    const info = await play.video_basic_info(url);
-    return {
-      tracks: [toYouTubeTrack(info.video_details, requestedBy)],
-      kind: "youtube_video",
-    };
+  const ytResolved = await resolveYoutubeUrlViaYtDlp(url, requestedBy);
+  if (!ytResolved) {
+    throw new Error("Не удалось получить метаданные YouTube через yt-dlp.");
   }
 
-  try {
-    const playlist = await play.playlist_info(url, { incomplete: true });
-    const videos = await playlist.all_videos();
-    const tracks = videos
-      .filter((video) => video?.url)
-      .slice(0, MAX_PLAYLIST_ITEMS)
-      .map((video) => toYouTubeTrack(video, requestedBy));
-
-    return {
-      tracks,
-      kind: "youtube_playlist",
-      title: playlist.title || "YouTube playlist",
-    };
-  } catch (error) {
-    throw new Error(`Не удалось открыть YouTube плейлист: ${error.message}`);
-  }
+  return ytResolved;
 }
 
 async function resolveSoundCloudUrl(url, requestedBy) {
@@ -1499,12 +1583,17 @@ async function resolveSoundCloudUrl(url, requestedBy) {
 }
 
 async function resolveCandidateVideo(url, requestedBy) {
-  const info = await play.video_basic_info(url);
-  if (!info?.video_details?.url) {
+  const entry = await fetchYtDlpJson(url, {
+    timeoutMs: 20_000,
+    cookiesPath: YTDLP_COOKIES_PATH,
+    flatPlaylist: false,
+  });
+  const track = toYouTubeTrackFromYtDlp(entry, requestedBy, url);
+  if (!track?.url) {
     throw new Error("Пустой ответ от YouTube");
   }
 
-  return toYouTubeTrack(info.video_details, requestedBy);
+  return track;
 }
 
 async function resolveFromSearch(query, requestedBy) {
