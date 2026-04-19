@@ -332,7 +332,7 @@ class GuildMusicPlayer {
           }
           if (!suppressTrackAction) {
             const requestedBy = next.requestedById ? `<@${next.requestedById}>` : safeLinkText(next.requestedByTag || "unknown");
-            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b: ${requestedBy}`);
+            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b ${requestedBy}`);
           }
           await this.refreshPanel();
           this.startProgressUpdater();

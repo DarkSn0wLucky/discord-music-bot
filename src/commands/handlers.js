@@ -492,7 +492,7 @@ async function handlePlay(interaction, manager) {
         embeds: [
           buildActionEmbed(
             "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c",
-            `${summary}${dropHint}\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b: ${requestedBy}`
+            `${summary}${dropHint}\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b ${requestedBy}`
           ),
         ],
       });

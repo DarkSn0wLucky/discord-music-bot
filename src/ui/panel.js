@@ -49,7 +49,7 @@ function buildPlayerEmbed(player) {
       { name: "TIME", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
       { name: "Дальше в очереди", value: queuePreview }
     )
-    .setFooter({ text: `Запросил: ${track.requestedByTag}` });
+    .setFooter({ text: `Запросил ${track.requestedByTag}` });
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);
