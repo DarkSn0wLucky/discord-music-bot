@@ -13,21 +13,30 @@
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, YTDLP_COOKIES_PATH } = require("../config");
+const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, VK_COOKIES_PATH, YTDLP_COOKIES_PATH } = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { safeLinkText } = require("../utils/format");
 
-function resolveYtDlpCookiesPath() {
-  const configuredPath = String(YTDLP_COOKIES_PATH || "").trim();
-  if (!configuredPath) {
+function resolveConfiguredCookiesPath(configuredPath) {
+  const value = String(configuredPath || "").trim();
+  if (!value) {
     return null;
   }
 
-  const absolutePath = path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(process.cwd(), configuredPath);
+  const absolutePath = path.isAbsolute(value)
+    ? value
+    : path.resolve(process.cwd(), value);
 
   return fs.existsSync(absolutePath) ? absolutePath : null;
+}
+
+function resolveYtDlpCookiesPath(track) {
+  const source = String(track?.source || "").toLowerCase();
+  if (source.includes("vk")) {
+    return resolveConfiguredCookiesPath(VK_COOKIES_PATH) || resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
+  }
+
+  return resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
 }
 
 function isSourceUnavailableError(message) {
@@ -173,7 +182,10 @@ class GuildMusicPlayer {
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
-          const cookiesPath = resolveYtDlpCookiesPath();
+          const cookiesPath = resolveYtDlpCookiesPath(next);
+          const isYouTubeLike =
+            /(?:youtube\.com|youtu\.be)/i.test(String(next.url || "")) ||
+            String(next.source || "").toLowerCase().includes("youtube");
 
           const ytDlpArgs = [
             "-o",
@@ -187,9 +199,17 @@ class GuildMusicPlayer {
             "128K",
             "--geo-bypass",
             "--force-ipv4",
-            "--extractor-args",
-            "youtube:player_client=android,ios,tv",
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
           ];
+
+          if (isYouTubeLike) {
+            ytDlpArgs.push("--extractor-args", "youtube:player_client=android,ios,tv");
+          }
+
+          if (String(next.source || "").toLowerCase().includes("vk")) {
+            ytDlpArgs.push("--referer", "https://vk.com/");
+          }
 
           if (cookiesPath) {
             ytDlpArgs.push("--cookies", cookiesPath);
@@ -309,7 +329,8 @@ class GuildMusicPlayer {
             await this.clearPanel();
           }
           if (!suppressTrackAction) {
-            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})`);
+            const requestedBy = next.requestedById ? `<@${next.requestedById}>` : safeLinkText(next.requestedByTag || "unknown");
+            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b: ${requestedBy}`);
           }
           await this.refreshPanel();
           this.startProgressUpdater();
@@ -337,7 +358,7 @@ class GuildMusicPlayer {
       }
 
       this.currentTrack = null;
-      await this.refreshPanel();
+      await this.clearPanel();
       this.scheduleAutoDisconnect();
     } finally {
       this.transitionLock = false;

@@ -7,6 +7,8 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
+const PLAY_REQUEST_TIMEOUT_MS = 20_000;
+const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -79,6 +81,12 @@ function buildLinkPickerCandidates(primaryTrack, extraCandidates = []) {
   }
 
   return unique;
+}
+
+function buildPlayTimeoutError() {
+  const error = new Error(PLAY_TIMEOUT_ERROR_CODE);
+  error.code = PLAY_TIMEOUT_ERROR_CODE;
+  return error;
 }
 
 function buildTrackPickerRows(customIdPrefix, tracks) {
@@ -236,7 +244,7 @@ async function ensureMusicChannel(interaction) {
     return true;
   }
 
-  const message = `Music commands are available only in ${getMusicChannelLabel()}.`;
+  const message = `\u041c\u0443\u0437\u044b\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0432 ${getMusicChannelLabel()}.`;
 
   if (interaction.deferred || interaction.replied) {
     await interaction.followUp({ content: message, ...EPHEMERAL_REPLY }).catch(() => null);
@@ -302,29 +310,62 @@ async function withPlayer(interaction, manager) {
 async function handlePlay(interaction, manager) {
   const memberVoice = interaction.member?.voice?.channel;
   if (!memberVoice) {
-    await interaction.reply({ content: "Зайди в голосовой канал и повтори `/play`.", ...EPHEMERAL_REPLY });
+    await interaction.reply({ content: "\u0417\u0430\u0439\u0434\u0438 \u0432 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043a\u0430\u043d\u0430\u043b \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438 `/play`.", ...EPHEMERAL_REPLY });
     return;
   }
 
   const botVoiceId = interaction.guild.members.me?.voice?.channelId;
   if (botVoiceId && botVoiceId !== memberVoice.id) {
     await interaction.reply({
-      content: "Я уже в другом голосовом канале. Зайди туда или останови плеер через `/stop`.",
+      content:
+        "\u042f \u0443\u0436\u0435 \u0432 \u0434\u0440\u0443\u0433\u043e\u043c \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u043c \u043a\u0430\u043d\u0430\u043b\u0435. \u0417\u0430\u0439\u0434\u0438 \u0442\u0443\u0434\u0430 \u0438\u043b\u0438 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438 \u043f\u043b\u0435\u0435\u0440 \u0447\u0435\u0440\u0435\u0437 `/stop`.",
       ...EPHEMERAL_REPLY,
     });
     return;
   }
 
   await interaction.deferReply();
+  let interactionTimedOut = false;
+  let thinkingTimer = setTimeout(async () => {
+    interactionTimedOut = true;
+    thinkingTimer = null;
+    await interaction
+      .editReply({
+        embeds: [
+          buildActionEmbed(
+            "\u0422\u0430\u0439\u043c\u0430\u0443\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u0430",
+            "\u041d\u0435 \u0443\u0441\u043f\u0435\u043b \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0437\u0430 20 \u0441\u0435\u043a\u0443\u043d\u0434. \u041e\u0442\u043f\u0440\u0430\u0432\u044c `/play` \u0435\u0449\u0435 \u0440\u0430\u0437."
+          ),
+        ],
+        components: [],
+      })
+      .catch(() => null);
+  }, PLAY_REQUEST_TIMEOUT_MS);
+
+  const clearThinkingTimer = () => {
+    if (!thinkingTimer) {
+      return;
+    }
+    clearTimeout(thinkingTimer);
+    thinkingTimer = null;
+  };
+
+  const ensurePlayActive = () => {
+    if (interactionTimedOut) {
+      throw buildPlayTimeoutError();
+    }
+  };
 
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
+      ensurePlayActive();
       const query = interaction.options.getString("query", true);
       const isDirectUrl = isUrlLike(query);
       let tracksToAdd = [];
 
       if (isDirectUrl) {
         const resolved = await resolveTracks(query, interaction.user);
+        ensurePlayActive();
         tracksToAdd = resolved.tracks;
 
         if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
@@ -332,9 +373,11 @@ async function handlePlay(interaction, manager) {
           const extraCandidates = await resolveSearchCandidates(primaryTrack.searchQuery, interaction.user, {
             limit: 8,
           }).catch(() => []);
+          ensurePlayActive();
           const candidates = buildLinkPickerCandidates(primaryTrack, extraCandidates);
 
           if (candidates.length > 1) {
+            clearThinkingTimer();
             const selectedTrack = await pickTrackFromMenu(interaction, primaryTrack.searchQuery, candidates);
             if (!selectedTrack) return;
 
@@ -350,11 +393,14 @@ async function handlePlay(interaction, manager) {
         }
       } else {
         const candidates = await resolveSearchCandidates(query, interaction.user, { limit: 5 });
+        ensurePlayActive();
         if (!candidates.length) {
-          await interaction.editReply("Ничего не найдено по запросу.");
+          clearThinkingTimer();
+          await interaction.editReply("\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.");
           return;
         }
 
+        clearThinkingTimer();
         const selectedTrack = await pickTrackFromMenu(interaction, query, candidates);
         if (!selectedTrack) return;
 
@@ -364,45 +410,66 @@ async function handlePlay(interaction, manager) {
       }
 
       if (!tracksToAdd.length) {
-        await interaction.editReply("Ничего не найдено по запросу.");
+        clearThinkingTimer();
+        await interaction.editReply("\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.");
         return;
       }
 
       const player = manager.getOrCreate(interaction.guild);
       await player.setTextChannel(interaction.channelId);
       await player.connect(memberVoice);
+      ensurePlayActive();
       const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
 
+      ensurePlayActive();
       const { accepted, dropped } = player.addTracks(tracksToAdd);
       if (accepted === 0) {
-        await interaction.editReply("Очередь заполнена, добавить новые треки пока нельзя.");
+        clearThinkingTimer();
+        await interaction.editReply(
+          "\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0430, \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u0435 \u0442\u0440\u0435\u043a\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435\u043b\u044c\u0437\u044f."
+        );
         return;
       }
 
       const first = tracksToAdd[0];
       const summary =
         accepted === 1
-          ? `[${safeLinkText(first.title)}](${first.url}) · ${formatDuration(first.durationSec)}`
-          : `Добавлено треков: ${accepted}`;
+          ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
+          : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
       const startedNow = await player.playIfIdle();
 
-      // First play in an empty queue: keep only now-playing action message.
       if (wasQueueEmpty) {
         if (!startedNow) {
           await player.refreshPanel();
         }
+        clearThinkingTimer();
         await clearDeferredReply(interaction);
         return;
       }
 
-      const dropHint = dropped > 0 ? `\nНе добавлено из-за лимита очереди: ${dropped}` : "";
+      const dropHint =
+        dropped > 0 ? `\n\u041d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0438\u0437-\u0437\u0430 \u043b\u0438\u043c\u0438\u0442\u0430 \u043e\u0447\u0435\u0440\u0435\u0434\u0438: ${dropped}` : "";
+      const requestedBy = first?.requestedById ? `<@${first.requestedById}>` : safeLinkText(first?.requestedByTag || "unknown");
+      clearThinkingTimer();
       await interaction.editReply({
-        embeds: [buildActionEmbed("Добавлено в очередь", `${summary}${dropHint}`)],
+        embeds: [
+          buildActionEmbed(
+            "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c",
+            `${summary}${dropHint}\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b: ${requestedBy}`
+          ),
+        ],
       });
       await player.refreshPanel({ moveToBottom: true });
     } catch (error) {
+      if (error?.code === PLAY_TIMEOUT_ERROR_CODE) {
+        return;
+      }
+
+      clearThinkingTimer();
       console.error("[Command:/play]", error);
-      await interaction.editReply(`Ошибка: ${error.message}`);
+      await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`);
+    } finally {
+      clearThinkingTimer();
     }
   });
 }

@@ -32,6 +32,7 @@ module.exports = {
   SPOTIFY_REFRESH_TOKEN: process.env.SPOTIFY_REFRESH_TOKEN || "",
   SPOTIFY_MARKET: process.env.SPOTIFY_MARKET || "US",
   YTDLP_COOKIES_PATH: process.env.YTDLP_COOKIES_PATH || "cookies.txt",
+  VK_COOKIES_PATH: process.env.VK_COOKIES_PATH || "",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
   MAX_QUEUE_SIZE: asNumber(process.env.MAX_QUEUE_SIZE, 150),
   MAX_PLAYLIST_ITEMS: asNumber(process.env.MAX_PLAYLIST_ITEMS, 50),

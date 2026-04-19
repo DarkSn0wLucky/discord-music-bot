@@ -1,13 +1,17 @@
 const http = require("http");
 const https = require("https");
 const { execFile } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 const play = require("play-dl");
 const {
   MAX_PLAYLIST_ITEMS,
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REFRESH_TOKEN,
+  VK_COOKIES_PATH,
   YOUTUBE_API_KEY,
+  YTDLP_COOKIES_PATH,
 } = require("../config");
 
 const SEARCH_RESULTS_LIMIT = 8;
@@ -153,6 +157,21 @@ function isYandexMusicHost(hostname) {
   return host === "music.yandex.ru" || host.startsWith("music.yandex.");
 }
 
+function isVkMusicHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
+}
+
+function resolveExistingFilePath(configuredPath) {
+  const value = String(configuredPath || "").trim();
+  if (!value) {
+    return null;
+  }
+
+  const absolute = path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
+  return fs.existsSync(absolute) ? absolute : null;
+}
+
 function parseYandexUrlInfo(url) {
   try {
     const parsed = new URL(url);
@@ -167,6 +186,9 @@ function parseYandexUrlInfo(url) {
         origin: parsed.origin,
         albumId: trackInAlbum[1],
         trackId: trackInAlbum[2],
+        playlistOwner: "",
+        playlistKind: "",
+        playlistUuid: "",
       };
     }
 
@@ -176,6 +198,9 @@ function parseYandexUrlInfo(url) {
         origin: parsed.origin,
         albumId: parsed.searchParams.get("album") || parsed.searchParams.get("albumId") || "",
         trackId: directTrack[1],
+        playlistOwner: "",
+        playlistKind: "",
+        playlistUuid: "",
       };
     }
 
@@ -185,6 +210,33 @@ function parseYandexUrlInfo(url) {
         origin: parsed.origin,
         albumId: album[1],
         trackId: "",
+        playlistOwner: "",
+        playlistKind: "",
+        playlistUuid: "",
+      };
+    }
+
+    const userPlaylist = pathName.match(/\/users\/([^/]+)\/playlists\/([^/?#]+)/i);
+    if (userPlaylist) {
+      return {
+        origin: parsed.origin,
+        albumId: "",
+        trackId: "",
+        playlistOwner: decodeURIComponent(userPlaylist[1] || ""),
+        playlistKind: decodeURIComponent(userPlaylist[2] || ""),
+        playlistUuid: "",
+      };
+    }
+
+    const directPlaylist = pathName.match(/\/playlists\/([a-z0-9-]{8,})/i);
+    if (directPlaylist) {
+      return {
+        origin: parsed.origin,
+        albumId: "",
+        trackId: "",
+        playlistOwner: "",
+        playlistKind: "",
+        playlistUuid: decodeURIComponent(directPlaylist[1] || ""),
       };
     }
 
@@ -192,6 +244,9 @@ function parseYandexUrlInfo(url) {
       origin: parsed.origin,
       albumId: "",
       trackId: "",
+      playlistOwner: "",
+      playlistKind: "",
+      playlistUuid: "",
     };
   } catch {
     return null;
@@ -796,10 +851,113 @@ async function fetchJsonWithTimeout(url) {
   }
 }
 
+function parseYandexPlaylistTargetFromHtml(html) {
+  const source = String(html || "");
+  if (!source) {
+    return null;
+  }
+
+  const directMatch = source.match(/"uid":(\d+),"kind":(\d+),"title":"/i);
+  if (directMatch) {
+    return {
+      owner: directMatch[1],
+      kind: directMatch[2],
+    };
+  }
+
+  const reverseMatch = source.match(/"kind":(\d+),"title":"[^"]+","coverUri":[\s\S]{0,800}?"uid":(\d+)/i);
+  if (reverseMatch) {
+    return {
+      owner: reverseMatch[2],
+      kind: reverseMatch[1],
+    };
+  }
+
+  return null;
+}
+
+async function resolveYandexPlaylistTarget(info, originalUrl) {
+  if (info.playlistOwner && info.playlistKind) {
+    return {
+      owner: info.playlistOwner,
+      kind: info.playlistKind,
+    };
+  }
+
+  if (!info.playlistUuid) {
+    return null;
+  }
+
+  const response = await requestTextWithRedirect(originalUrl, {
+    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://music.yandex.ru/",
+    },
+  }).catch(() => null);
+
+  if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+    return null;
+  }
+
+  return parseYandexPlaylistTargetFromHtml(response.body);
+}
+
+async function fetchYandexPlaylistData(origin, owner, kind) {
+  const playlistUrl = new URL("/handlers/playlist.jsx", origin);
+  playlistUrl.searchParams.set("owner", String(owner));
+  playlistUrl.searchParams.set("kinds", String(kind));
+  playlistUrl.searchParams.set("overembed", "false");
+
+  let playlistData = await fetchJsonWithTimeout(playlistUrl.toString());
+  if (playlistData?.playlist) {
+    return playlistData;
+  }
+
+  playlistUrl.searchParams.delete("overembed");
+  playlistUrl.searchParams.set("lang", "ru");
+  playlistData = await fetchJsonWithTimeout(playlistUrl.toString());
+  return playlistData?.playlist ? playlistData : null;
+}
+
 async function resolveYandexUrl(url, requestedBy) {
   const info = parseYandexUrlInfo(url);
   if (!info) {
     return null;
+  }
+
+  if (info.playlistKind || info.playlistUuid) {
+    const target = await resolveYandexPlaylistTarget(info, url);
+    if (!target?.owner || !target?.kind) {
+      return null;
+    }
+
+    const playlistData = await fetchYandexPlaylistData(info.origin, target.owner, target.kind);
+    const playlist = playlistData?.playlist;
+    const rawTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+    if (rawTracks.length === 0) {
+      return null;
+    }
+
+    const metadata = rawTracks.map((item) => {
+      const track = item?.track || item || {};
+      return {
+        title: track?.title || "",
+        artist: joinArtists(track?.artists),
+      };
+    });
+
+    const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+    if (resolvedTracks.length > 0) {
+      return {
+        tracks: resolvedTracks,
+        kind: "yandex_playlist",
+        title: playlist?.title || "Yandex playlist",
+      };
+    }
   }
 
   if (info.trackId) {
@@ -989,6 +1147,137 @@ async function resolveDeezerUrl(url, requestedBy) {
     kind: deezer.type === "playlist" ? "deezer_playlist" : "deezer_album",
     title: deezer.title || "Deezer",
   };
+}
+
+function normalizeVkEntryUrl(entry, fallbackUrl) {
+  const candidates = [entry?.webpage_url, entry?.url, entry?.original_url]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  for (const value of candidates) {
+    if (/^https?:\/\//i.test(value)) {
+      return value;
+    }
+    if (value.startsWith("/")) {
+      return `https://vk.com${value}`;
+    }
+    if (/^(audio|music|playlist|wall|video)/i.test(value)) {
+      return `https://vk.com/${value.replace(/^\/+/, "")}`;
+    }
+  }
+
+  return fallbackUrl;
+}
+
+function toVkTrack(entry, requestedBy, fallbackUrl) {
+  const durationSec = Number(entry?.duration) || 0;
+
+  return {
+    title: String(entry?.title || entry?.track || "VK Music track").trim() || "VK Music track",
+    url: normalizeVkEntryUrl(entry, fallbackUrl),
+    source: "VK Music",
+    author: String(entry?.uploader || entry?.artist || entry?.channel || "VK Music").trim() || "VK Music",
+    views: Number(entry?.view_count) || 0,
+    durationSec,
+    durationMs: durationSec > 0 ? durationSec * 1000 : 0,
+    thumbnail: entry?.thumbnail || null,
+    requestedById: requestedBy.id,
+    requestedByTag: requestedBy.tag || requestedBy.username,
+  };
+}
+
+function fetchYtDlpJson(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "--dump-single-json",
+      "--flat-playlist",
+      "--no-warnings",
+      "--skip-download",
+      "--user-agent",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    ];
+
+    const cookiesPath = resolveExistingFilePath(options.cookiesPath);
+    if (cookiesPath) {
+      args.push("--cookies", cookiesPath);
+    }
+
+    args.push(String(url));
+
+    execFile(
+      "yt-dlp",
+      args,
+      {
+        windowsHide: true,
+        timeout: Number(options.timeoutMs) || 25_000,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        const output = String(stdout || "").trim();
+        if (error || !output) {
+          const message = String(stderr || error?.message || "yt-dlp failed").trim();
+          reject(new Error(message || "yt-dlp failed"));
+          return;
+        }
+
+        try {
+          resolve(JSON.parse(output));
+        } catch {
+          reject(new Error("yt-dlp returned invalid JSON"));
+        }
+      }
+    );
+  });
+}
+
+async function resolveVkUrl(url, requestedBy) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+
+  if (!isVkMusicHost(parsed.hostname)) {
+    return null;
+  }
+
+  const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
+  const vkJson = await fetchYtDlpJson(url, {
+    timeoutMs: 30_000,
+    cookiesPath,
+  }).catch(() => null);
+
+  if (!vkJson) {
+    return null;
+  }
+
+  const entries = Array.isArray(vkJson.entries) ? vkJson.entries.filter(Boolean) : [];
+  if (entries.length > 0) {
+    const tracks = entries
+      .slice(0, MAX_PLAYLIST_ITEMS)
+      .map((entry) => toVkTrack(entry, requestedBy, url))
+      .filter((track) => track?.url);
+
+    if (tracks.length > 0) {
+      return {
+        tracks,
+        kind: "vk_playlist",
+        title: vkJson.title || "VK playlist",
+      };
+    }
+  }
+
+  const singleTrack = toVkTrack(vkJson, requestedBy, url);
+  if (singleTrack?.url) {
+    return {
+      tracks: [singleTrack],
+      kind: "vk_track",
+      title: vkJson.title || "VK track",
+    };
+  }
+
+  return null;
 }
 
 async function fetchExternalPageMetadata(url) {
@@ -1287,6 +1576,27 @@ async function resolveTracks(query, requestedBy) {
     });
     if (deezerResolved) {
       return deezerResolved;
+    }
+
+    let isVkMusicUrl = false;
+    try {
+      isVkMusicUrl = isVkMusicHost(new URL(input).hostname);
+    } catch {
+      isVkMusicUrl = false;
+    }
+
+    const vkResolved = await resolveVkUrl(input, requestedBy).catch((error) => {
+      console.warn(`[Resolve] VK URL fallback (${input}): ${error.message}`);
+      return null;
+    });
+    if (vkResolved) {
+      return vkResolved;
+    }
+
+    if (isVkMusicUrl) {
+      throw new Error(
+        "Не удалось открыть VK Music ссылку. Для VK треков/плейлистов без YouTube нужен актуальный VK cookies файл (VK_COOKIES_PATH)."
+      );
     }
 
     const externalResolved = await resolveGenericExternalUrl(input, requestedBy);
