@@ -68,6 +68,20 @@ function normalizeInput(raw) {
   return raw.trim().replace(/^<(.+)>$/g, "$1");
 }
 
+function extractUrlFromText(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const match = text.match(/https?:\/\/[^\s<>"'`]+/iu);
+  if (!match?.[0]) {
+    return "";
+  }
+
+  return match[0].replace(/[)\],.;!?]+$/u, "");
+}
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -279,6 +293,39 @@ function cleanExternalTitle(title, siteName = "") {
     .trim();
 
   return value;
+}
+
+function isGenericLandingTitle(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return true;
+  }
+
+  const blockedPhrases = [
+    "яндекс музыка",
+    "яндекс музыка собираем музыку для вас",
+    "yandex music",
+    "yandex music discover",
+  ];
+
+  return blockedPhrases.some((phrase) => normalized === phrase || normalized.startsWith(`${phrase} `));
+}
+
+function hasQueryTokenCoverage(value, query) {
+  const normalizedValue = normalizeText(value);
+  if (!normalizedValue) {
+    return false;
+  }
+
+  const queryTokens = normalizeText(query)
+    .split(" ")
+    .filter((token) => token.length > 1 && !QUERY_STOPWORDS.has(token));
+
+  if (queryTokens.length === 0) {
+    return false;
+  }
+
+  return queryTokens.every((token) => normalizedValue.includes(token));
 }
 
 function packSearchTracks(rawTracks, query) {
@@ -566,6 +613,29 @@ async function resolveTrackByMetadataQuery(query, requestedBy) {
   return packSearchTracks(candidates, normalizedQuery);
 }
 
+async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
+  const uniqueQueries = [...new Set((queries || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  if (uniqueQueries.length === 0) {
+    return null;
+  }
+
+  const accept = typeof options.accept === "function" ? options.accept : () => true;
+  for (const query of uniqueQueries) {
+    const track = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
+    if (!track) {
+      continue;
+    }
+
+    if (!accept(track, query)) {
+      continue;
+    }
+
+    return track;
+  }
+
+  return null;
+}
+
 async function resolveTracksFromMetadataItems(items, requestedBy) {
   const sourceItems = Array.isArray(items) ? items.slice(0, MAX_PLAYLIST_ITEMS) : [];
   const resolvedTracks = [];
@@ -743,7 +813,14 @@ async function resolveYandexUrl(url, requestedBy) {
     if (trackMeta?.title) {
       const artist = joinArtists(trackMeta.artists);
       const query = buildQueryFromArtistTitle(artist, trackMeta.title);
-      const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy);
+      const resolvedTrack =
+        (await resolveTrackByQueryVariants(
+          [query, buildQueryFromArtistTitle(artist, `${trackMeta.title} official`), buildQueryFromArtistTitle(artist, `${trackMeta.title} audio`)],
+          requestedBy,
+          {
+            accept: (candidate) => hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, query),
+          }
+        )) || (await resolveTrackByMetadataQuery(query, requestedBy));
       if (resolvedTrack) {
         return {
           tracks: [resolvedTrack],
@@ -780,7 +857,14 @@ async function resolveYandexUrl(url, requestedBy) {
 
       if (exactTrack?.title) {
         const query = buildQueryFromArtistTitle(joinArtists(exactTrack.artists), exactTrack.title);
-        const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy);
+        const resolvedTrack =
+          (await resolveTrackByQueryVariants(
+            [query, `${query} official`, `${query} audio`],
+            requestedBy,
+            {
+              accept: (candidate) => hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, query),
+            }
+          )) || (await resolveTrackByMetadataQuery(query, requestedBy));
         if (resolvedTrack) {
           return {
             tracks: [resolvedTrack],
@@ -969,6 +1053,18 @@ async function resolveGenericExternalUrl(url, requestedBy) {
     return null;
   }
 
+  const finalHost = (() => {
+    try {
+      return new URL(pageMeta.finalUrl || url).hostname;
+    } catch {
+      return "";
+    }
+  })();
+
+  if (isGenericLandingTitle(cleanedTitle) && (isYandexMusicHost(finalHost) || /music\.yandex/i.test(cleanedTitle))) {
+    return null;
+  }
+
   const track = await resolveTrackByMetadataQuery(cleanedTitle, requestedBy);
   if (!track) {
     return null;
@@ -1145,7 +1241,9 @@ async function resolveFromSearch(query, requestedBy) {
 }
 
 async function resolveTracks(query, requestedBy) {
-  const input = normalizeInput(query);
+  const normalizedInput = normalizeInput(query);
+  const extractedUrl = isUrl(normalizedInput) ? normalizedInput : extractUrlFromText(normalizedInput);
+  const input = extractedUrl || normalizedInput;
 
   if (!input) {
     return { tracks: [], kind: "empty" };
