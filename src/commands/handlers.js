@@ -7,7 +7,6 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
-const URL_METADATA_PICK_KINDS = new Set(["yandex_track", "spotify_track", "deezer_track", "external_url"]);
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -280,7 +279,6 @@ async function handlePlay(interaction, manager) {
         tracksToAdd = resolved.tracks;
 
         if (
-          URL_METADATA_PICK_KINDS.has(resolved.kind) &&
           tracksToAdd.length === 1 &&
           tracksToAdd[0]?.searchQuery &&
           Array.isArray(tracksToAdd[0]?.fallbackTracks) &&
