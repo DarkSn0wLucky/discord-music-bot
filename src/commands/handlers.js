@@ -7,7 +7,7 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
-const PLAY_REQUEST_TIMEOUT_MS = 20_000;
+const PLAY_REQUEST_TIMEOUT_MS = 30_000;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
 
 function enqueuePlayRequest(guildId, task) {
@@ -87,6 +87,38 @@ function buildPlayTimeoutError() {
   const error = new Error(PLAY_TIMEOUT_ERROR_CODE);
   error.code = PLAY_TIMEOUT_ERROR_CODE;
   return error;
+}
+
+function withPromiseTimeout(promise, timeoutMs, timeoutErrorFactory) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(typeof timeoutErrorFactory === "function" ? timeoutErrorFactory() : new Error("Timed out"));
+    }, timeoutMs);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 function buildTrackPickerRows(customIdPrefix, tracks) {
@@ -334,7 +366,7 @@ async function handlePlay(interaction, manager) {
         embeds: [
           buildActionEmbed(
             "\u0422\u0430\u0439\u043c\u0430\u0443\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u0430",
-            "\u041d\u0435 \u0443\u0441\u043f\u0435\u043b \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0437\u0430 20 \u0441\u0435\u043a\u0443\u043d\u0434. \u041e\u0442\u043f\u0440\u0430\u0432\u044c `/play` \u0435\u0449\u0435 \u0440\u0430\u0437."
+            "\u041d\u0435 \u0443\u0441\u043f\u0435\u043b \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0437\u0430 30 \u0441\u0435\u043a\u0443\u043d\u0434. \u041e\u0442\u043f\u0440\u0430\u0432\u044c `/play` \u0435\u0449\u0435 \u0440\u0430\u0437."
           ),
         ],
         components: [],
@@ -356,6 +388,9 @@ async function handlePlay(interaction, manager) {
     }
   };
 
+  const runWithPlayTimeout = (promise) =>
+    withPromiseTimeout(promise, PLAY_REQUEST_TIMEOUT_MS, buildPlayTimeoutError);
+
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
       ensurePlayActive();
@@ -364,15 +399,17 @@ async function handlePlay(interaction, manager) {
       let tracksToAdd = [];
 
       if (isDirectUrl) {
-        const resolved = await resolveTracks(query, interaction.user);
+        const resolved = await runWithPlayTimeout(resolveTracks(query, interaction.user));
         ensurePlayActive();
         tracksToAdd = resolved.tracks;
 
         if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
           const primaryTrack = tracksToAdd[0];
-          const extraCandidates = await resolveSearchCandidates(primaryTrack.searchQuery, interaction.user, {
-            limit: 8,
-          }).catch(() => []);
+          const extraCandidates = await runWithPlayTimeout(
+            resolveSearchCandidates(primaryTrack.searchQuery, interaction.user, {
+              limit: 8,
+            })
+          ).catch(() => []);
           ensurePlayActive();
           const candidates = buildLinkPickerCandidates(primaryTrack, extraCandidates);
 
@@ -392,7 +429,7 @@ async function handlePlay(interaction, manager) {
           }
         }
       } else {
-        const candidates = await resolveSearchCandidates(query, interaction.user, { limit: 5 });
+        const candidates = await runWithPlayTimeout(resolveSearchCandidates(query, interaction.user, { limit: 5 }));
         ensurePlayActive();
         if (!candidates.length) {
           clearThinkingTimer();
@@ -417,7 +454,7 @@ async function handlePlay(interaction, manager) {
 
       const player = manager.getOrCreate(interaction.guild);
       await player.setTextChannel(interaction.channelId);
-      await player.connect(memberVoice);
+      await runWithPlayTimeout(player.connect(memberVoice));
       ensurePlayActive();
       const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
 
@@ -436,7 +473,7 @@ async function handlePlay(interaction, manager) {
         accepted === 1
           ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
           : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
-      const startedNow = await player.playIfIdle();
+      const startedNow = await runWithPlayTimeout(player.playIfIdle());
 
       if (wasQueueEmpty) {
         if (!startedNow) {
