@@ -7,6 +7,7 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
+const URL_METADATA_PICK_KINDS = new Set(["yandex_track", "spotify_track", "deezer_track", "external_url"]);
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -277,6 +278,23 @@ async function handlePlay(interaction, manager) {
       if (isDirectUrl) {
         const resolved = await resolveTracks(query, interaction.user);
         tracksToAdd = resolved.tracks;
+
+        if (
+          URL_METADATA_PICK_KINDS.has(resolved.kind) &&
+          tracksToAdd.length === 1 &&
+          tracksToAdd[0]?.searchQuery &&
+          Array.isArray(tracksToAdd[0]?.fallbackTracks) &&
+          tracksToAdd[0].fallbackTracks.length > 0
+        ) {
+          const primaryTrack = tracksToAdd[0];
+          const candidates = [primaryTrack, ...primaryTrack.fallbackTracks].slice(0, 5);
+          const selectedTrack = await pickTrackFromMenu(interaction, primaryTrack.searchQuery, candidates);
+          if (!selectedTrack) return;
+
+          selectedTrack.searchQuery = primaryTrack.searchQuery;
+          selectedTrack.fallbackTracks = candidates.filter((candidate) => candidate.url !== selectedTrack.url).slice(0, 4);
+          tracksToAdd = [selectedTrack];
+        }
       } else {
         const candidates = await resolveSearchCandidates(query, interaction.user, { limit: 5 });
         if (!candidates.length) {
