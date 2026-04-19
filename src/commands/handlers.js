@@ -304,7 +304,7 @@ async function sendStoppedByNotice(player, user) {
   await player
     .sendAction(
       "Музыка остановлена",
-      `Сессию завершил <@${user.id}>.`
+      `Сессию завершил <@${user.id}>`
     )
     .catch(() => null);
 }
