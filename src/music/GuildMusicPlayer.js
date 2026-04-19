@@ -182,6 +182,7 @@ class GuildMusicPlayer {
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
+          let hasStartedPlaying = false;
           const cookiesPath = resolveYtDlpCookiesPath(next);
           const isYouTubeLike =
             /(?:youtube\.com|youtu\.be)/i.test(String(next.url || "")) ||
@@ -282,11 +283,12 @@ class GuildMusicPlayer {
 
             const onStateChange = (oldState, newState) => {
               if (newState.status === AudioPlayerStatus.Playing) {
+                hasStartedPlaying = true;
                 finishResolve();
                 return;
               }
 
-              if (newState.status === AudioPlayerStatus.Idle && (ytdlpFailed || processClosed)) {
+              if (newState.status === AudioPlayerStatus.Idle && !hasStartedPlaying && (ytdlpFailed || processClosed)) {
                 finishReject(
                   new Error(
                     ytdlpErrorText.trim() || "РСЃС‚РѕС‡РЅРёРє Р·Р°РєСЂС‹Р» РїРѕС‚РѕРє РґРѕ РЅР°С‡Р°Р»Р° РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёСЏ"
@@ -296,7 +298,7 @@ class GuildMusicPlayer {
             };
 
             const timeout = setTimeout(() => {
-              if (this.player.state.status === AudioPlayerStatus.Playing) {
+              if (this.player.state.status === AudioPlayerStatus.Playing || hasStartedPlaying) {
                 finishResolve();
                 return;
               }
@@ -317,7 +319,7 @@ class GuildMusicPlayer {
           });
 
           await new Promise((resolve) => setTimeout(resolve, 1200));
-          if (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed) {
+          if (!hasStartedPlaying && (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed)) {
             throw new Error(ytdlpErrorText.trim() || "Source stream closed before stable start");
           }
 
