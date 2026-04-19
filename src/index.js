@@ -11,6 +11,16 @@ if (ffmpegPath) {
   process.env.PATH = `${ffmpegDir}${path.delimiter}${process.env.PATH || ""}`;
 }
 
+process.on("unhandledRejection", (reason) => {
+  const message =
+    reason instanceof Error
+      ? `${reason.message}\n${reason.stack || ""}`
+      : typeof reason === "string"
+        ? reason
+        : JSON.stringify(reason);
+  console.error("[UnhandledRejection]", message);
+});
+
 assertEnv(["DISCORD_TOKEN"]);
 
 const client = new Client({
