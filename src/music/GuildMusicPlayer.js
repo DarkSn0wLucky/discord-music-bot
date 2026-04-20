@@ -15,11 +15,9 @@ const fs = require("fs");
 const path = require("path");
 const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, VK_COOKIES_PATH, YTDLP_COOKIES_PATH } = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
-const { resolveSearchCandidates } = require("./resolveTrack");
 const { safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
-const PLAY_START_STABILITY_WAIT_MS = 2_500;
 const cookiesPathCache = new Map();
 
 function resolveConfiguredCookiesPath(configuredPath) {
@@ -59,37 +57,6 @@ function isSourceUnavailableError(message) {
   return /(not available|unavailable|private video|video is unavailable|copyright|deleted|blocked|403|410|no video formats found)/i.test(
     String(message)
   );
-}
-
-function isYouTubeAuthGateError(message) {
-  if (!message) {
-    return false;
-  }
-
-  return /(sign in to confirm you.?re not a bot|http error 403|forbidden|login required)/i.test(String(message));
-}
-
-function uniqueTracksByUrl(tracks, excludedUrls = new Set(), limit = Infinity) {
-  const sourceTracks = Array.isArray(tracks) ? tracks : [];
-  const seenUrls = new Set(
-    [...excludedUrls].map((url) => String(url || "").trim()).filter((url) => url.length > 0)
-  );
-  const unique = [];
-
-  for (const track of sourceTracks) {
-    const url = String(track?.url || "").trim();
-    if (!url || seenUrls.has(url)) {
-      continue;
-    }
-
-    seenUrls.add(url);
-    unique.push(track);
-    if (unique.length >= limit) {
-      break;
-    }
-  }
-
-  return unique;
 }
 
 class GuildMusicPlayer {
@@ -261,7 +228,6 @@ class GuildMusicPlayer {
           let processExitCode = null;
           let failedBeforePlaying = false;
           let hasStartedPlaying = false;
-          let playingStartedAt = null;
           const cookiesPath = resolveYtDlpCookiesPath(next);
           const isYouTubeLike =
             /(?:youtube\.com|youtu\.be)/i.test(String(next.url || "")) ||
@@ -371,10 +337,7 @@ class GuildMusicPlayer {
             const onStateChange = (oldState, newState) => {
               if (newState.status === AudioPlayerStatus.Playing) {
                 hasStartedPlaying = true;
-                if (!playingStartedAt) {
-                  playingStartedAt = Date.now();
-                }
-                if (failedBeforePlaying || ytdlpFailed || (processClosed && processExitCode !== null && processExitCode !== 0)) {
+                if (failedBeforePlaying) {
                   finishReject(
                     new Error(
                       ytdlpErrorText.trim() || "Источник завершился с ошибкой до стабильного старта воспроизведения"
@@ -397,14 +360,6 @@ class GuildMusicPlayer {
 
             const timeout = setTimeout(() => {
               if (this.player.state.status === AudioPlayerStatus.Playing || hasStartedPlaying) {
-                if (ytdlpFailed || (processClosed && processExitCode !== null && processExitCode !== 0)) {
-                  finishReject(
-                    new Error(
-                      ytdlpErrorText.trim() || "Источник завершился с ошибкой до стабильного старта воспроизведения"
-                    )
-                  );
-                  return;
-                }
                 finishResolve();
                 return;
               }
@@ -424,16 +379,10 @@ class GuildMusicPlayer {
             this.player.on("stateChange", onStateChange);
           });
 
-          await new Promise((resolve) => setTimeout(resolve, PLAY_START_STABILITY_WAIT_MS));
-          const failedWithExitCode = processClosed && processExitCode !== null && processExitCode !== 0;
-          const durationSec = Number(next.durationSec || 0);
-          const longTrack = Number.isFinite(durationSec) ? durationSec > 8 : true;
+          await new Promise((resolve) => setTimeout(resolve, 1200));
           if (
             failedBeforePlaying ||
-            failedWithExitCode ||
-            ytdlpFailed ||
-            !hasStartedPlaying ||
-            (longTrack && this.player.state.status !== AudioPlayerStatus.Playing)
+            (!hasStartedPlaying && (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed))
           ) {
             throw new Error(
               ytdlpErrorText.trim() ||
@@ -444,7 +393,7 @@ class GuildMusicPlayer {
           }
 
           if (this.currentTrack) {
-            this.currentTrack.startedAt = playingStartedAt || Date.now();
+            this.currentTrack.startedAt = Date.now();
           }
 
           if (!preservePanelMessage) {
@@ -462,71 +411,17 @@ class GuildMusicPlayer {
           this.cleanupActiveStreamProcess();
           this.currentTrack = null;
 
-          const triedUrls = new Set(
-            [next.url, ...(Array.isArray(next.triedUrls) ? next.triedUrls : [])]
-              .map((url) => String(url || "").trim())
-              .filter((url) => url.length > 0)
-          );
-          const staticFallbackTracks = uniqueTracksByUrl(next.fallbackTracks, triedUrls, 5);
-          if (staticFallbackTracks.length > 0) {
-            const [fallbackTrack, ...restFallbacks] = staticFallbackTracks;
-            const retryTrack = {
-              ...fallbackTrack,
-              fallbackTracks: restFallbacks,
-              searchQuery: fallbackTrack.searchQuery || next.searchQuery,
-              requestedById: next.requestedById || fallbackTrack.requestedById,
-              requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
-              triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
-              dynamicFallbackTried: Boolean(next.dynamicFallbackTried),
-            };
+          if (Array.isArray(next.fallbackTracks) && next.fallbackTracks.length > 0) {
+            const [fallbackTrack, ...restFallbacks] = next.fallbackTracks;
+            fallbackTrack.fallbackTracks = restFallbacks;
+            this.queue.unshift(fallbackTrack);
 
-            this.queue.unshift(retryTrack);
             await this.sendAction(
               "Источник недоступен",
               `**${safeLinkText(next.title)}** недоступен, пробую запасной вариант по запросу.`,
               { autoDeleteMs: 10_000 }
             );
             continue;
-          }
-
-          const isYouTubeLikeTrack =
-            /(?:youtube\.com|youtu\.be)/i.test(String(next.url || "")) ||
-            String(next.source || "").toLowerCase().includes("youtube");
-          const fallbackQuery = String(next.searchQuery || next.title || "").trim();
-          if (
-            isYouTubeLikeTrack &&
-            fallbackQuery &&
-            isYouTubeAuthGateError(error.message) &&
-            !next.dynamicFallbackTried
-          ) {
-            const requestedBy = {
-              id: next.requestedById || this.client.user?.id || "system",
-              tag: next.requestedByTag || "unknown",
-              username: next.requestedByTag || "unknown",
-            };
-            const dynamicCandidates = await resolveSearchCandidates(fallbackQuery, requestedBy, { limit: 8 }).catch(() => []);
-            const freshCandidates = uniqueTracksByUrl(dynamicCandidates, triedUrls, 5);
-
-            if (freshCandidates.length > 0) {
-              const [fallbackTrack, ...restFallbacks] = freshCandidates;
-              const retryTrack = {
-                ...fallbackTrack,
-                fallbackTracks: restFallbacks,
-                searchQuery: fallbackQuery,
-                requestedById: next.requestedById || fallbackTrack.requestedById,
-                requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
-                triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
-                dynamicFallbackTried: true,
-              };
-
-              this.queue.unshift(retryTrack);
-              await this.sendAction(
-                "Источник недоступен",
-                `**${safeLinkText(next.title)}** недоступен, пробую другой вариант по запросу.`,
-                { autoDeleteMs: 10_000 }
-              );
-              continue;
-            }
           }
 
           const actionTitle = isSourceUnavailableError(error.message) ? "Трек недоступен" : "Трек пропущен";
