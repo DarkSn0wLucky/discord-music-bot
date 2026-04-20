@@ -10,6 +10,10 @@ class MusicManager {
     return this.players.get(guildId);
   }
 
+  delete(guildId) {
+    this.players.delete(guildId);
+  }
+
   getOrCreate(guild) {
     const existing = this.players.get(guild.id);
     if (existing) {
@@ -19,6 +23,7 @@ class MusicManager {
     const player = new GuildMusicPlayer({
       guild,
       client: this.client,
+      onDispose: (guildId) => this.delete(guildId),
     });
 
     this.players.set(guild.id, player);
@@ -29,4 +34,3 @@ class MusicManager {
 module.exports = {
   MusicManager,
 };
-
