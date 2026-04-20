@@ -1,4 +1,4 @@
-const {
+﻿const {
   AudioPlayerStatus,
   NoSubscriberBehavior,
   VoiceConnectionStatus,
@@ -17,27 +17,17 @@ const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, VK_COOKIES_PATH, YTD
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { safeLinkText } = require("../utils/format");
 
-const COOKIES_PATH_CACHE_TTL_MS = 30_000;
-const cookiesPathCache = new Map();
-
 function resolveConfiguredCookiesPath(configuredPath) {
   const value = String(configuredPath || "").trim();
   if (!value) {
     return null;
   }
 
-  const cached = cookiesPathCache.get(value);
-  if (cached && Date.now() - cached.checkedAt <= COOKIES_PATH_CACHE_TTL_MS) {
-    return cached.absolutePath;
-  }
-
   const absolutePath = path.isAbsolute(value)
     ? value
     : path.resolve(process.cwd(), value);
 
-  const resolvedPath = fs.existsSync(absolutePath) ? absolutePath : null;
-  cookiesPathCache.set(value, { absolutePath: resolvedPath, checkedAt: Date.now() });
-  return resolvedPath;
+  return fs.existsSync(absolutePath) ? absolutePath : null;
 }
 
 function resolveYtDlpCookiesPath(track) {
@@ -60,10 +50,9 @@ function isSourceUnavailableError(message) {
 }
 
 class GuildMusicPlayer {
-  constructor({ guild, client, onDispose }) {
+  constructor({ guild, client }) {
     this.guild = guild;
     this.client = client;
-    this.onDispose = typeof onDispose === "function" ? onDispose : null;
     this.queue = [];
     this.currentTrack = null;
     this.loopMode = "off";
@@ -79,7 +68,6 @@ class GuildMusicPlayer {
     this.autoDisconnectTimer = null;
     this.updateInterval = null;
     this.updateTimeout = null;
-    this.activeStreamProcess = null;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -101,39 +89,8 @@ class GuildMusicPlayer {
       console.error(`[Music:${this.guild.id}] Audio player error`, error);
       this.sendAction("РћС€РёР±РєР° РїР»РµРµСЂР°", `РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ: \`${error.message}\``).catch(() => null);
       this.forceSkip = true;
-      this.cleanupActiveStreamProcess();
       this.player.stop(true);
     });
-  }
-
-  cleanupActiveStreamProcess(targetProcess = this.activeStreamProcess) {
-    if (!targetProcess) {
-      return;
-    }
-
-    if (targetProcess === this.activeStreamProcess) {
-      this.activeStreamProcess = null;
-    }
-
-    if (targetProcess.killed) {
-      return;
-    }
-
-    try {
-      targetProcess.kill("SIGKILL");
-    } catch {
-      // ignore
-    }
-  }
-
-  disposeIfIdle() {
-    if (this.connection || this.currentTrack || this.queue.length > 0) {
-      return;
-    }
-
-    if (this.onDispose) {
-      this.onDispose(this.guild.id);
-    }
   }
 
   async setTextChannel(channelId) {
@@ -263,7 +220,6 @@ class GuildMusicPlayer {
           ytDlpArgs.push(next.url);
 
           const ytDlp = spawn("yt-dlp", ytDlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
-          this.activeStreamProcess = ytDlp;
 
           ytDlp.stderr.on("data", (data) => {
             const line = data.toString().trim();
@@ -284,9 +240,6 @@ class GuildMusicPlayer {
           });
 
           ytDlp.on("close", (code, signal) => {
-            if (this.activeStreamProcess === ytDlp) {
-              this.activeStreamProcess = null;
-            }
             processClosed = true;
             console.log(`[yt-dlp exited] code=${code} signal=${signal} track=${next.title}`);
 
@@ -386,7 +339,6 @@ class GuildMusicPlayer {
           return;
         } catch (error) {
           console.error(`[Play Error] ${next.title}: ${error.message}`);
-          this.cleanupActiveStreamProcess();
           this.currentTrack = null;
 
           if (Array.isArray(next.fallbackTracks) && next.fallbackTracks.length > 0) {
@@ -432,7 +384,6 @@ class GuildMusicPlayer {
     this.preservePanelOnNextTrack = false;
 
     this.stopProgressUpdater();
-    this.cleanupActiveStreamProcess();
 
     if (!skipped) {
       if (this.loopMode === "track") {
@@ -497,7 +448,6 @@ class GuildMusicPlayer {
     this.suppressNextTrackAction = true;
     this.preservePanelOnNextTrack = true;
     this.forceSkip = true;
-    this.cleanupActiveStreamProcess();
     this.player.stop(true);
     return { ok: true, message: "РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ." };
   }
@@ -512,13 +462,11 @@ class GuildMusicPlayer {
     this.forceSkip = true;
     this.suppressNextTrackAction = false;
     this.preservePanelOnNextTrack = false;
-    this.cleanupActiveStreamProcess();
     this.player.stop(true);
 
     await this.disconnectFromVoice(false);
     await this.clearPanel();
     await this.clearRecentPanels();
-    this.disposeIfIdle();
 
     return hadTracks
       ? { ok: true, message: "РћС‡РµСЂРµРґСЊ РѕС‡РёС‰РµРЅР°, Р±РѕС‚ РѕС‚РєР»СЋС‡С‘РЅ." }
@@ -564,11 +512,9 @@ class GuildMusicPlayer {
       this.connection.destroy();
     }
 
-    this.cleanupActiveStreamProcess();
     this.connection = null;
     this.boundConnection = null;
     this.voiceChannelId = null;
-    this.disposeIfIdle();
   }
 
   scheduleAutoDisconnect() {
@@ -581,7 +527,6 @@ class GuildMusicPlayer {
 
       await this.disconnectFromVoice(true, "РџСѓСЃС‚Р°СЏ РѕС‡РµСЂРµРґСЊ Р±РѕР»РµРµ 3 РјРёРЅСѓС‚.");
       await this.refreshPanel();
-      this.disposeIfIdle();
     }, AUTO_DISCONNECT_MS);
   }
 

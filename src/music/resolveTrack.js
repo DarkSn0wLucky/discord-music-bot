@@ -1,6 +1,5 @@
 const http = require("http");
 const https = require("https");
-const dns = require("dns");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -20,10 +19,7 @@ const SEARCH_TRACK_PACK_SIZE = 4;
 const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
-const METADATA_RESOLVE_CONCURRENCY = 3;
-const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
-const networkCheckCache = new Map();
 
 const QUERY_STOPWORDS = new Set([
   "official",
@@ -164,108 +160,6 @@ function isYandexMusicHost(hostname) {
 function isVkMusicHost(hostname) {
   const host = String(hostname || "").toLowerCase();
   return host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
-}
-
-function isPrivateIPv4(address) {
-  const parts = String(address || "")
-    .trim()
-    .split(".");
-
-  if (parts.length !== 4 || parts.some((chunk) => !/^\d+$/.test(chunk))) {
-    return false;
-  }
-
-  const numbers = parts.map((chunk) => Number(chunk));
-  if (numbers.some((value) => value < 0 || value > 255)) {
-    return false;
-  }
-
-  const [a, b] = numbers;
-  if (a === 10 || a === 127 || a === 0) {
-    return true;
-  }
-  if (a === 169 && b === 254) {
-    return true;
-  }
-  if (a === 192 && b === 168) {
-    return true;
-  }
-  if (a === 172 && b >= 16 && b <= 31) {
-    return true;
-  }
-
-  return false;
-}
-
-function isPrivateIPv6(address) {
-  const value = String(address || "").toLowerCase().trim();
-  if (!value) {
-    return false;
-  }
-
-  return value === "::1" || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("fe80:");
-}
-
-function isPrivateIpAddress(address) {
-  return isPrivateIPv4(address) || isPrivateIPv6(address);
-}
-
-function isBlockedHostname(hostname) {
-  const host = String(hostname || "").toLowerCase().trim();
-  if (!host) {
-    return true;
-  }
-
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
-    return true;
-  }
-
-  if (host === "metadata.google.internal" || host.endsWith(".internal")) {
-    return true;
-  }
-
-  return false;
-}
-
-async function isBlockedNetworkTarget(url) {
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return true;
-  }
-
-  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    return true;
-  }
-
-  const hostname = String(parsedUrl.hostname || "").toLowerCase();
-  if (!hostname || isBlockedHostname(hostname)) {
-    return true;
-  }
-
-  if (isPrivateIpAddress(hostname)) {
-    return true;
-  }
-
-  const cached = networkCheckCache.get(hostname);
-  if (cached && Date.now() - cached.checkedAt <= NETWORK_CHECK_CACHE_TTL_MS) {
-    return cached.blocked;
-  }
-
-  try {
-    const lookupResults = await dns.promises.lookup(hostname, { all: true, verbatim: true });
-    const blocked = !Array.isArray(lookupResults) || lookupResults.length === 0
-      ? true
-      : lookupResults.some((entry) => isPrivateIpAddress(entry?.address));
-
-    networkCheckCache.set(hostname, { blocked, checkedAt: Date.now() });
-    return blocked;
-  } catch {
-    // Fail closed for external URL probing to avoid SSRF bypass via DNS tricks.
-    networkCheckCache.set(hostname, { blocked: true, checkedAt: Date.now() });
-    return true;
-  }
 }
 
 function resolveExistingFilePath(configuredPath) {
@@ -799,58 +693,43 @@ async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
 
 async function resolveTracksFromMetadataItems(items, requestedBy) {
   const sourceItems = Array.isArray(items) ? items.slice(0, MAX_PLAYLIST_ITEMS) : [];
-  if (!sourceItems.length) {
-    return [];
-  }
+  const resolvedTracks = [];
 
-  const results = new Array(sourceItems.length).fill(null);
-  let cursor = 0;
-  const workerCount = Math.max(1, Math.min(METADATA_RESOLVE_CONCURRENCY, sourceItems.length));
+  for (const item of sourceItems) {
+    const title = String(item?.title || "").trim();
+    if (!title) {
+      continue;
+    }
 
-  async function worker() {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= sourceItems.length) {
-        return;
-      }
+    const artist = String(item?.artist || "").trim();
+    const query = buildQueryFromArtistTitle(artist, title);
+    const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
+    if (resolvedTrack) {
+      resolvedTracks.push(resolvedTrack);
+    }
 
-      const item = sourceItems[index];
-      const title = String(item?.title || "").trim();
-      if (!title) {
-        continue;
-      }
-
-      const artist = String(item?.artist || "").trim();
-      const query = buildQueryFromArtistTitle(artist, title);
-      const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
-      if (resolvedTrack) {
-        results[index] = resolvedTrack;
-      }
+    if (resolvedTracks.length >= MAX_PLAYLIST_ITEMS) {
+      break;
     }
   }
 
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results.filter(Boolean).slice(0, MAX_PLAYLIST_ITEMS);
+  return resolvedTracks;
 }
 
-async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
+function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   const maxRedirects = 4;
   const timeoutMs = Number(options.timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS;
   const headers = options.headers || {};
 
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(url);
-  } catch (error) {
-    throw error;
-  }
-
-  if (await isBlockedNetworkTarget(parsedUrl.toString())) {
-    throw new Error("Blocked target URL");
-  }
-
   return new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
     const client = parsedUrl.protocol === "http:" ? http : https;
     const req = client.request(
       parsedUrl,
@@ -864,9 +743,7 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
         if (location && statusCode >= 300 && statusCode < 400 && redirectCount < maxRedirects) {
           const nextUrl = new URL(location, parsedUrl).toString();
           res.resume();
-          requestTextWithRedirect(nextUrl, options, redirectCount + 1)
-            .then(resolve)
-            .catch(reject);
+          requestTextWithRedirect(nextUrl, options, redirectCount + 1).then(resolve).catch(reject);
           return;
         }
 
@@ -1502,9 +1379,14 @@ async function resolveVkUrl(url, requestedBy) {
 }
 
 async function fetchExternalPageMetadata(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
+
   try {
-    const response = await requestTextWithRedirect(url, {
-      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
       headers: {
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -1513,22 +1395,18 @@ async function fetchExternalPageMetadata(url) {
       },
     });
 
-    if (!response || response.statusCode < 200 || response.statusCode >= 300) {
-      return null;
-    }
-
-    const contentType = String(response.headers?.["content-type"] || "").toLowerCase();
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
     if (!contentType.includes("text/html")) {
       return null;
     }
 
-    const html = String(response.body || "");
+    const html = await response.text();
     const ogTitle = extractMetaContent(html, "property", "og:title");
     const twitterTitle = extractMetaContent(html, "name", "twitter:title");
     const siteName = extractMetaContent(html, "property", "og:site_name");
     const titleTag = extractTitleTag(html);
 
-    const finalUrl = response.finalUrl || url;
+    const finalUrl = response.url || url;
     const hostName = (() => {
       try {
         return new URL(finalUrl).hostname;
@@ -1546,6 +1424,8 @@ async function fetchExternalPageMetadata(url) {
     };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

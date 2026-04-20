@@ -11,11 +11,6 @@ if (ffmpegPath) {
   process.env.PATH = `${ffmpegDir}${path.delimiter}${process.env.PATH || ""}`;
 }
 
-const nodeMajor = Number(String(process.versions.node || "0").split(".")[0] || 0);
-if (Number.isFinite(nodeMajor) && nodeMajor > 0 && nodeMajor < 22) {
-  console.warn(`[Runtime] Node.js ${process.versions.node} detected. Recommended >= 22 for @discordjs/voice stability.`);
-}
-
 process.on("unhandledRejection", (reason) => {
   const message =
     reason instanceof Error

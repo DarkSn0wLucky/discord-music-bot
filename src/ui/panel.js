@@ -21,7 +21,7 @@ function buildPlayerEmbed(player) {
         { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
         { name: "В очереди", value: String(player.queue.length), inline: true }
       )
-      .setFooter({ text: "Music mode" });
+      .setFooter({ text: "Минималистичный music mode" });
   }
 
   const track = player.currentTrack;

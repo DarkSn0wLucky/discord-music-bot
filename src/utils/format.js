@@ -19,26 +19,26 @@ function truncate(text, maxLength = 60) {
     return "";
   }
 
-  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 function safeLinkText(text) {
-  return String(text || "\u0411\u0435\u0437 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f").replace(/\[/g, "(").replace(/\]/g, ")");
+  return String(text || "Без названия").replace(/\[/g, "(").replace(/\]/g, ")");
 }
 
 function progressBar(elapsedMs, totalMs, size = 14) {
   if (!Number.isFinite(totalMs) || totalMs <= 0) {
-    return "[LIVE]";
+    return "● LIVE";
   }
 
   const ratio = Math.max(0, Math.min(1, elapsedMs / totalMs));
   const markerIndex = Math.max(0, Math.min(size - 1, Math.round(ratio * (size - 1))));
   const bar = Array.from({ length: size }, (_, index) => {
     if (index === markerIndex) {
-      return "o";
+      return "●";
     }
 
-    return index < markerIndex ? "=" : "-";
+    return index < markerIndex ? "━" : "─";
   });
 
   return bar.join("");
@@ -46,14 +46,14 @@ function progressBar(elapsedMs, totalMs, size = 14) {
 
 function loopLabel(mode) {
   if (mode === "track") {
-    return "\u0422\u0440\u0435\u043a";
+    return "Трек";
   }
 
   if (mode === "queue") {
-    return "\u041e\u0447\u0435\u0440\u0435\u0434\u044c";
+    return "Очередь";
   }
 
-  return "\u0412\u044b\u043a\u043b";
+  return "Выкл";
 }
 
 module.exports = {
