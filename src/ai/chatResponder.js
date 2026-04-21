@@ -17,9 +17,47 @@ const { buildAssociationPrompt } = require("./personAssociations");
 const DISCORD_MESSAGE_LIMIT = 1900;
 const TYPING_INTERVAL_MS = 4000;
 const MAX_BATCH_MESSAGES = 80;
+const MIN_PARTICIPANTS_TO_REPLY = 2;
+const CONVO_NEAR_MS = 25_000;
 
 const pendingBatchesByChannel = new Map();
 const generationQueueByChannel = new Map();
+
+const STOP_WORDS = new Set([
+  "это",
+  "так",
+  "как",
+  "что",
+  "чтобы",
+  "чтоб",
+  "если",
+  "или",
+  "для",
+  "его",
+  "ее",
+  "она",
+  "они",
+  "мы",
+  "вы",
+  "тебя",
+  "тебе",
+  "меня",
+  "мне",
+  "твой",
+  "твоя",
+  "ваш",
+  "ваша",
+  "мой",
+  "моя",
+  "and",
+  "the",
+  "you",
+  "your",
+  "with",
+  "this",
+  "that",
+  "from",
+]);
 
 function trimText(value, maxLength) {
   const raw = String(value || "").replace(/\s+/g, " ").trim();
@@ -78,7 +116,7 @@ function extractMessageText(message) {
 
   const attachmentCount = Number(message.attachments?.size || 0);
   if (attachmentCount > 0) {
-    return `[вложений: ${attachmentCount}]`;
+    return `[attachments: ${attachmentCount}]`;
   }
 
   return "";
@@ -133,7 +171,172 @@ function enqueuePerChannel(channelId, task) {
   return next;
 }
 
-function buildBatchPrompt(channelName, entries) {
+function tokenizeForTopic(text) {
+  const normalized = String(text || "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[^0-9a-zа-яё]+/gi, " ");
+
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+    .filter((token) => !STOP_WORDS.has(token));
+
+  return Array.from(new Set(tokens));
+}
+
+function overlapCount(tokensA, tokensB) {
+  if (!tokensA.length || !tokensB.length) {
+    return 0;
+  }
+
+  const smaller = tokensA.length <= tokensB.length ? tokensA : tokensB;
+  const largerSet = new Set(tokensA.length <= tokensB.length ? tokensB : tokensA);
+  let count = 0;
+  for (const token of smaller) {
+    if (largerSet.has(token)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function buildPairKey(leftUserId, rightUserId) {
+  return leftUserId < rightUserId
+    ? `${leftUserId}|${rightUserId}`
+    : `${rightUserId}|${leftUserId}`;
+}
+
+function getPairStats(pairMap, leftUserId, rightUserId) {
+  const key = buildPairKey(leftUserId, rightUserId);
+  const existing = pairMap.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const stats = {
+    leftUserId: leftUserId < rightUserId ? leftUserId : rightUserId,
+    rightUserId: leftUserId < rightUserId ? rightUserId : leftUserId,
+    turnLinks: 0,
+    mentionLinks: 0,
+    replyLinks: 0,
+    tokenOverlapMax: 0,
+  };
+  pairMap.set(key, stats);
+  return stats;
+}
+
+function shouldConnectUsers(stats) {
+  if (!stats) {
+    return false;
+  }
+
+  if (stats.replyLinks > 0 || stats.mentionLinks > 0) {
+    return true;
+  }
+  if (stats.tokenOverlapMax >= 2) {
+    return true;
+  }
+  if (stats.tokenOverlapMax >= 1 && stats.turnLinks >= 1) {
+    return true;
+  }
+  if (stats.turnLinks >= 3) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildConversationGroups(entries) {
+  const decorated = entries
+    .filter((entry) => entry?.userId)
+    .map((entry, index) => ({
+      ...entry,
+      index,
+      timestampMs: Number(entry.timestampMs || 0),
+      tokens: tokenizeForTopic(entry.text),
+      mentionUserIds: Array.isArray(entry.mentionUserIds) ? entry.mentionUserIds : [],
+      replyToMessageId: String(entry.replyToMessageId || ""),
+      messageId: String(entry.messageId || ""),
+    }));
+
+  const participants = Array.from(new Set(decorated.map((entry) => entry.userId)));
+  if (participants.length === 0) {
+    return [];
+  }
+
+  const pairStatsMap = new Map();
+  for (let i = 0; i < decorated.length; i += 1) {
+    const left = decorated[i];
+    for (let j = i + 1; j < decorated.length; j += 1) {
+      const right = decorated[j];
+      if (!left.userId || !right.userId || left.userId === right.userId) {
+        continue;
+      }
+
+      const stats = getPairStats(pairStatsMap, left.userId, right.userId);
+      const overlap = overlapCount(left.tokens, right.tokens);
+      if (overlap > stats.tokenOverlapMax) {
+        stats.tokenOverlapMax = overlap;
+      }
+
+      const msDiff = Math.abs(left.timestampMs - right.timestampMs);
+      if (j === i + 1 && msDiff <= CONVO_NEAR_MS) {
+        stats.turnLinks += 1;
+      }
+
+      if (left.mentionUserIds.includes(right.userId) || right.mentionUserIds.includes(left.userId)) {
+        stats.mentionLinks += 1;
+      }
+
+      if (left.replyToMessageId && left.replyToMessageId === right.messageId) {
+        stats.replyLinks += 1;
+      }
+      if (right.replyToMessageId && right.replyToMessageId === left.messageId) {
+        stats.replyLinks += 1;
+      }
+    }
+  }
+
+  const adjacency = new Map(participants.map((userId) => [userId, new Set()]));
+  for (const stats of pairStatsMap.values()) {
+    if (!shouldConnectUsers(stats)) {
+      continue;
+    }
+    adjacency.get(stats.leftUserId)?.add(stats.rightUserId);
+    adjacency.get(stats.rightUserId)?.add(stats.leftUserId);
+  }
+
+  const visited = new Set();
+  const components = [];
+  for (const userId of participants) {
+    if (visited.has(userId)) {
+      continue;
+    }
+
+    const stack = [userId];
+    visited.add(userId);
+    const component = [];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      component.push(current);
+      for (const next of adjacency.get(current) || []) {
+        if (visited.has(next)) {
+          continue;
+        }
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+
+    components.push(component);
+  }
+
+  return components;
+}
+
+function buildGroupPrompt(channelName, entries) {
   const lines = entries
     .slice(0, MAX_BATCH_MESSAGES)
     .map((entry, index) => `${index + 1}. ${entry.author}: ${entry.text}`);
@@ -151,7 +354,7 @@ function buildBatchPrompt(channelName, entries) {
   }
 
   promptParts.push("");
-  promptParts.push("Ответь одним сообщением в стиле персонажа.");
+  promptParts.push("Ответь одним сообщением в стиле персонажа с короткой реакцией на эту группу сообщений.");
   return promptParts.join("\n");
 }
 
@@ -215,12 +418,29 @@ async function fetchGeminiBatchReply(prompt) {
   }
 }
 
-async function generateBatchReply(channel, entries) {
+async function sendGroupedReplies(channel, entries) {
   if (!entries.length) {
     return;
   }
 
-  const prompt = buildBatchPrompt(channel.name, entries);
+  const uniqueUsers = Array.from(new Set(entries.map((entry) => entry.userId).filter(Boolean)));
+  if (uniqueUsers.length < MIN_PARTICIPANTS_TO_REPLY) {
+    return;
+  }
+
+  const sortedEntries = entries
+    .filter((entry) => entry?.userId)
+    .sort((left, right) => Number(left.timestampMs || 0) - Number(right.timestampMs || 0));
+
+  const groups = buildConversationGroups(sortedEntries);
+  if (groups.length === 0) {
+    return;
+  }
+
+  console.log(
+    `[AI] groupedReplies channel=${channel.id} participants=${uniqueUsers.length} groups=${groups.length}`
+  );
+
   let typingTimer = null;
   try {
     await channel.sendTyping().catch(() => null);
@@ -228,25 +448,46 @@ async function generateBatchReply(channel, entries) {
       channel.sendTyping().catch(() => null);
     }, TYPING_INTERVAL_MS);
 
-    const generation = await fetchGeminiBatchReply(prompt);
-    const rawReply = generation.text;
-    if (generation.finishReason && generation.finishReason !== "STOP") {
-      console.warn(
-        `[AI] finishReason=${generation.finishReason} channel=${channel.id} entries=${entries.length}`
-      );
-    }
-    if (generation.promptFeedback?.blockReason) {
-      console.warn(
-        `[AI] prompt blocked reason=${generation.promptFeedback.blockReason} channel=${channel.id}`
-      );
-    }
+    for (const groupUserIds of groups) {
+      const groupSet = new Set(groupUserIds);
+      const groupEntries = sortedEntries.filter((entry) => groupSet.has(entry.userId));
+      if (groupEntries.length === 0) {
+        continue;
+      }
 
-    const reply = trimText(sanitizeDiscordMentions(rawReply), Math.min(AI_MAX_OUTPUT_CHARS, DISCORD_MESSAGE_LIMIT));
-    if (!reply) {
-      return;
-    }
+      const prompt = buildGroupPrompt(channel.name, groupEntries);
+      const generation = await fetchGeminiBatchReply(prompt);
+      if (generation.finishReason && generation.finishReason !== "STOP") {
+        console.warn(
+          `[AI] finishReason=${generation.finishReason} channel=${channel.id} entries=${groupEntries.length}`
+        );
+      }
+      if (generation.promptFeedback?.blockReason) {
+        console.warn(
+          `[AI] prompt blocked reason=${generation.promptFeedback.blockReason} channel=${channel.id}`
+        );
+      }
 
-    await channel.send({ content: reply });
+      const tags = groupUserIds.filter(Boolean).map((userId) => `<@${userId}>`).join(" ");
+      const replyBody = trimText(
+        sanitizeDiscordMentions(generation.text),
+        Math.min(AI_MAX_OUTPUT_CHARS, DISCORD_MESSAGE_LIMIT)
+      );
+      if (!replyBody) {
+        continue;
+      }
+
+      const composed = tags ? `${tags} ${replyBody}` : replyBody;
+      const content = trimText(composed, DISCORD_MESSAGE_LIMIT);
+
+      await channel.send({
+        content,
+        allowedMentions: {
+          parse: [],
+          users: groupUserIds.filter(Boolean),
+        },
+      });
+    }
   } catch (error) {
     console.warn(`[AI] Batch reply failed in #${channel.id}: ${error.message || error}`);
   } finally {
@@ -271,7 +512,7 @@ function flushBatch(channel) {
   }
 
   enqueuePerChannel(channelId, async () => {
-    await generateBatchReply(channel, snapshot);
+    await sendGroupedReplies(channel, snapshot);
   }).catch(() => null);
 }
 
@@ -287,9 +528,14 @@ async function handleAiMessage(message) {
 
   const state = getOrCreateBatchState(message.channelId);
   state.entries.push({
+    messageId: message.id || "",
+    timestampMs: Number(message.createdTimestamp || Date.now()),
+    replyToMessageId: message.reference?.messageId || "",
+    mentionUserIds: Array.from(message.mentions?.users?.keys?.() || []),
     userId: message.author?.id || "",
     username: message.author?.username || "",
     globalName: message.author?.globalName || "",
+    displayName: message.member?.displayName || "",
     author: trimText(message.member?.displayName || message.author?.username || "user", 64),
     text,
   });
@@ -305,3 +551,4 @@ async function handleAiMessage(message) {
 module.exports = {
   handleAiMessage,
 };
+

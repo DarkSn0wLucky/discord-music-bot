@@ -18,8 +18,8 @@ const ASSOCIATIONS = [
   {
     keys: ["darksnowlucky"],
     fullName: "Семён",
-    nicknames: ["зайка"],
-    traits: ["создатель и владелец бота"],
+    nicknames: [],
+    traits: [],
   },
   {
     keys: ["v1nn11"],
@@ -112,4 +112,3 @@ module.exports = {
   findAssociation,
   buildAssociationPrompt,
 };
-
