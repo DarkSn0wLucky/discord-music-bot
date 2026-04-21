@@ -1,4 +1,4 @@
-const http = require("http");
+﻿const http = require("http");
 const https = require("https");
 const dns = require("dns");
 const { execFile } = require("child_process");
@@ -44,11 +44,11 @@ const QUERY_STOPWORDS = new Set([
   "ft",
   "version",
   "ver",
-  "песня",
-  "песню",
-  "песни",
-  "трек",
-  "музыка",
+  "РїРµСЃРЅСЏ",
+  "РїРµСЃРЅСЋ",
+  "РїРµСЃРЅРё",
+  "С‚СЂРµРє",
+  "РјСѓР·С‹РєР°",
 ]);
 
 const EXTRA_VERSION_KEYWORDS = new Set([
@@ -66,13 +66,13 @@ const EXTRA_VERSION_KEYWORDS = new Set([
   "concert",
   "slowed",
   "slowedreverb",
-  "акустика",
-  "акустический",
-  "концерт",
-  "караоке",
-  "кавер",
-  "ремикс",
-  "версия",
+  "Р°РєСѓСЃС‚РёРєР°",
+  "Р°РєСѓСЃС‚РёС‡РµСЃРєРёР№",
+  "РєРѕРЅС†РµСЂС‚",
+  "РєР°СЂР°РѕРєРµ",
+  "РєР°РІРµСЂ",
+  "СЂРµРјРёРєСЃ",
+  "РІРµСЂСЃРёСЏ",
 ]);
 
 function normalizeInput(raw) {
@@ -96,7 +96,7 @@ function extractUrlFromText(raw) {
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
-    .replace(/ё/g, "е")
+    .replace(/С‘/g, "Рµ")
     .normalize("NFKC")
     .replace(/[\p{P}\p{S}]+/gu, " ")
     .replace(/\s+/g, " ")
@@ -383,11 +383,126 @@ function youtubeThumb(video) {
   return null;
 }
 
+function extractYouTubeVideoId(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    const host = String(parsed.hostname || "").toLowerCase();
+
+    if (host === "youtu.be") {
+      const id = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+      return /^[\w-]{11}$/.test(id) ? id : "";
+    }
+
+    if (host.endsWith("youtube.com")) {
+      const byQuery = parsed.searchParams.get("v");
+      if (/^[\w-]{11}$/.test(byQuery || "")) {
+        return byQuery;
+      }
+
+      const segments = parsed.pathname.split("/").filter(Boolean);
+      const shortsIndex = segments.indexOf("shorts");
+      if (shortsIndex >= 0 && /^[\w-]{11}$/.test(segments[shortsIndex + 1] || "")) {
+        return segments[shortsIndex + 1];
+      }
+
+      const embedIndex = segments.indexOf("embed");
+      if (embedIndex >= 0 && /^[\w-]{11}$/.test(segments[embedIndex + 1] || "")) {
+        return segments[embedIndex + 1];
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function parseIsoDurationToSeconds(isoDuration) {
+  const value = String(isoDuration || "").trim();
+  if (!value) {
+    return 0;
+  }
+
+  const match = value.match(/P(?:([\d.]+)D)?(?:T(?:([\d.]+)H)?(?:([\d.]+)M)?(?:([\d.]+)S)?)?/i);
+  if (!match) {
+    return 0;
+  }
+
+  const days = Number(match[1] || 0);
+  const hours = Number(match[2] || 0);
+  const minutes = Number(match[3] || 0);
+  const seconds = Number(match[4] || 0);
+  const total = days * 86400 + hours * 3600 + minutes * 60 + seconds;
+  return Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0;
+}
+
+function youtubeSnippetThumb(snippet) {
+  const thumbs = snippet?.thumbnails || {};
+  return (
+    thumbs.maxres?.url ||
+    thumbs.standard?.url ||
+    thumbs.high?.url ||
+    thumbs.medium?.url ||
+    thumbs.default?.url ||
+    null
+  );
+}
+
+function toYouTubeTrackFromApiItem(item, requestedBy) {
+  const videoId = String(item?.id || "").trim();
+  if (!/^[\w-]{11}$/.test(videoId)) {
+    return null;
+  }
+
+  const snippet = item?.snippet || {};
+  const stats = item?.statistics || {};
+  const durationSec = parseIsoDurationToSeconds(item?.contentDetails?.duration);
+
+  return {
+    title: String(snippet.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ").trim() || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    source: "YouTube",
+    author: String(snippet.channelTitle || "YouTube").trim() || "YouTube",
+    views: Number(stats.viewCount) || 0,
+    durationSec,
+    durationMs: durationSec > 0 ? durationSec * 1000 : 0,
+    thumbnail: youtubeSnippetThumb(snippet),
+    requestedById: requestedBy.id,
+    requestedByTag: requestedBy.tag || requestedBy.username,
+  };
+}
+
+async function fetchYouTubeApiVideoItems(videoIds) {
+  if (!YOUTUBE_API_KEY) {
+    return [];
+  }
+
+  const ids = [...new Set((videoIds || []).map((id) => String(id || "").trim()).filter(Boolean))].slice(0, 50);
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    part: "snippet,contentDetails,statistics",
+    id: ids.join(","),
+    key: YOUTUBE_API_KEY,
+    maxResults: String(ids.length),
+  });
+
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
+  if (!response.ok) {
+    return [];
+  }
+
+  const data = await response.json();
+  return Array.isArray(data.items) ? data.items : [];
+}
+
 function toYouTubeTrack(video, requestedBy) {
   const durationSec = Number(video.durationInSec) || 0;
 
   return {
-    title: video.title || "Без названия",
+    title: video.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: video.url,
     source: "YouTube",
     author: video.channel?.name || video.channel?.title || "YouTube",
@@ -405,7 +520,7 @@ function toSoundCloudTrack(track, requestedBy) {
   const durationMs = Number(track.durationInMs) || (durationSec > 0 ? durationSec * 1000 : 0);
 
   return {
-    title: track.name || "Без названия",
+    title: track.name || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: track.permalink || track.url,
     source: "SoundCloud",
     author: track.user?.name || "SoundCloud",
@@ -449,10 +564,10 @@ function cleanExternalTitle(title, siteName = "") {
   }
 
   value = value
-    .replace(/\s*[|•]\s*[^|•]+$/u, "")
-    .replace(/\s+[-–—]\s*(yandex music|яндекс музыка|spotify|vk music|вконтакте|deezer|apple music|tidal)\s*$/iu, "")
-    .replace(/^(listen to|watch|слушать)\s+/iu, "")
-    .replace(/\s+(on|в)\s+(spotify|youtube|yandex music|яндекс музыке|vk music|deezer|apple music|tidal)\s*$/iu, "")
+    .replace(/\s*[|вЂў]\s*[^|вЂў]+$/u, "")
+    .replace(/\s+[-вЂ“вЂ”]\s*(yandex music|СЏРЅРґРµРєСЃ РјСѓР·С‹РєР°|spotify|vk music|РІРєРѕРЅС‚Р°РєС‚Рµ|deezer|apple music|tidal)\s*$/iu, "")
+    .replace(/^(listen to|watch|СЃР»СѓС€Р°С‚СЊ)\s+/iu, "")
+    .replace(/\s+(on|РІ)\s+(spotify|youtube|yandex music|СЏРЅРґРµРєСЃ РјСѓР·С‹РєРµ|vk music|deezer|apple music|tidal)\s*$/iu, "")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -466,8 +581,8 @@ function isGenericLandingTitle(value) {
   }
 
   const blockedPhrases = [
-    "яндекс музыка",
-    "яндекс музыка собираем музыку для вас",
+    "СЏРЅРґРµРєСЃ РјСѓР·С‹РєР°",
+    "СЏРЅРґРµРєСЃ РјСѓР·С‹РєР° СЃРѕР±РёСЂР°РµРј РјСѓР·С‹РєСѓ РґР»СЏ РІР°СЃ",
     "yandex music",
     "yandex music discover",
   ];
@@ -658,7 +773,7 @@ function scoreCandidate(track, queryMeta) {
   const durationSec = Number(track?.durationSec) || 0;
   const tokenCount = queryMeta.tokens.length || 1;
   const viewsWeight = tokenCount <= 2 ? 13 : tokenCount <= 4 ? 11 : 8;
-  const hasArtistInTitle = /[-–—]/u.test(String(track?.title || ""));
+  const hasArtistInTitle = /[-вЂ“вЂ”]/u.test(String(track?.title || ""));
   const exactTitleMatch = normalizedTitle === queryMeta.normalizedQuery;
   const titleTokenCount = normalizedTitle ? normalizedTitle.split(" ").length : 0;
   const isTopicChannel = /- topic$/iu.test(String(track?.author || ""));
@@ -695,7 +810,7 @@ function scoreCandidate(track, queryMeta) {
     score -= 10;
   }
 
-  const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("концерт");
+  const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("РєРѕРЅС†РµСЂС‚");
   if (!queryHintsLongVersion && durationSec > 11 * 60) {
     score -= 6;
   }
@@ -749,13 +864,68 @@ async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_
     return [];
   }
 
-  const settled = await Promise.allSettled(selectedUrls.map((url) => resolveCandidateVideo(url, requestedBy)));
   const resolved = [];
+  const resolvedUrls = new Set();
+  const youtubeIdByUrl = new Map();
+
+  for (const url of selectedUrls) {
+    const id = extractYouTubeVideoId(url);
+    if (id) {
+      youtubeIdByUrl.set(url, id);
+    }
+  }
+
+  if (youtubeIdByUrl.size > 0) {
+    const apiItems = await fetchYouTubeApiVideoItems([...new Set(youtubeIdByUrl.values())]).catch(() => []);
+    const apiTrackById = new Map();
+
+    for (const item of apiItems) {
+      const track = toYouTubeTrackFromApiItem(item, requestedBy);
+      if (!track?.url) {
+        continue;
+      }
+
+      const id = extractYouTubeVideoId(track.url);
+      if (id) {
+        apiTrackById.set(id, track);
+      }
+    }
+
+    for (const url of selectedUrls) {
+      const id = youtubeIdByUrl.get(url);
+      if (!id) {
+        continue;
+      }
+
+      const track = apiTrackById.get(id);
+      if (!track?.url || resolvedUrls.has(track.url)) {
+        continue;
+      }
+
+      resolved.push(track);
+      resolvedUrls.add(track.url);
+    }
+  }
+
+  const unresolvedUrls = selectedUrls.filter((url) => {
+    const id = youtubeIdByUrl.get(url);
+    if (!id) {
+      return true;
+    }
+
+    return !resolved.some((track) => extractYouTubeVideoId(track.url) === id);
+  });
+
+  const settled = await Promise.allSettled(unresolvedUrls.map((url) => resolveCandidateVideo(url, requestedBy)));
 
   settled.forEach((result, index) => {
-    const url = selectedUrls[index];
+    const url = unresolvedUrls[index];
     if (result.status === "fulfilled") {
-      resolved.push(result.value);
+      const track = result.value;
+      if (track?.url && !resolvedUrls.has(track.url)) {
+        resolved.push(track);
+        resolvedUrls.add(track.url);
+      }
     } else {
       console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${result.reason?.message || "Unknown error"}`);
     }
@@ -1204,7 +1374,7 @@ async function resolveSpotifyUrl(url, requestedBy) {
     const query = buildQueryFromArtistTitle(joinArtists(spotify.artists), spotify.name);
     const track = await resolveTrackByMetadataQuery(query, requestedBy);
     if (!track) {
-      throw new Error("Не удалось подобрать источник по Spotify-треку.");
+      throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРѕР±СЂР°С‚СЊ РёСЃС‚РѕС‡РЅРёРє РїРѕ Spotify-С‚СЂРµРєСѓ.");
     }
 
     return {
@@ -1222,7 +1392,7 @@ async function resolveSpotifyUrl(url, requestedBy) {
 
   const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
   if (tracks.length === 0) {
-    throw new Error("Не удалось сопоставить Spotify-треки с YouTube-источниками.");
+    throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕРїРѕСЃС‚Р°РІРёС‚СЊ Spotify-С‚СЂРµРєРё СЃ YouTube-РёСЃС‚РѕС‡РЅРёРєР°РјРё.");
   }
 
   return {
@@ -1247,7 +1417,7 @@ async function resolveDeezerUrl(url, requestedBy) {
     const query = buildQueryFromArtistTitle(deezer.artist?.name, deezer.title);
     const track = await resolveTrackByMetadataQuery(query, requestedBy);
     if (!track) {
-      throw new Error("Не удалось подобрать источник по Deezer-треку.");
+      throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРґРѕР±СЂР°С‚СЊ РёСЃС‚РѕС‡РЅРёРє РїРѕ Deezer-С‚СЂРµРєСѓ.");
     }
 
     return {
@@ -1265,7 +1435,7 @@ async function resolveDeezerUrl(url, requestedBy) {
 
   const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
   if (tracks.length === 0) {
-    throw new Error("Не удалось сопоставить Deezer-треки с YouTube-источниками.");
+    throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕРїРѕСЃС‚Р°РІРёС‚СЊ Deezer-С‚СЂРµРєРё СЃ YouTube-РёСЃС‚РѕС‡РЅРёРєР°РјРё.");
   }
 
   return {
@@ -1349,7 +1519,7 @@ function toYouTubeTrackFromYtDlp(entry, requestedBy, fallbackUrl = "") {
     null;
 
   return {
-    title: String(entry?.title || "Без названия").trim() || "Без названия",
+    title: String(entry?.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ").trim() || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url,
     source: "YouTube",
     author: String(entry?.uploader || entry?.channel || entry?.artist || "YouTube").trim() || "YouTube",
@@ -1636,7 +1806,7 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
   }
 
   if (isUrl(normalizedQuery)) {
-    throw new Error("Для меню выбора нужен текстовый запрос, а не ссылка.");
+    throw new Error("Р”Р»СЏ РјРµРЅСЋ РІС‹Р±РѕСЂР° РЅСѓР¶РµРЅ С‚РµРєСЃС‚РѕРІС‹Р№ Р·Р°РїСЂРѕСЃ, Р° РЅРµ СЃСЃС‹Р»РєР°.");
   }
 
   const rawCandidates = [];
@@ -1692,9 +1862,23 @@ async function resolveYoutubeUrl(url, requestedBy) {
     return null;
   }
 
+  if (ytType === "video") {
+    const directVideoId = extractYouTubeVideoId(url);
+    if (directVideoId) {
+      const [item] = await fetchYouTubeApiVideoItems([directVideoId]).catch(() => []);
+      const track = toYouTubeTrackFromApiItem(item, requestedBy);
+      if (track) {
+        return {
+          tracks: [track],
+          kind: "youtube_video",
+        };
+      }
+    }
+  }
+
   const ytResolved = await resolveYoutubeUrlViaYtDlp(url, requestedBy);
   if (!ytResolved) {
-    throw new Error("Не удалось получить метаданные YouTube через yt-dlp.");
+    throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РјРµС‚Р°РґР°РЅРЅС‹Рµ YouTube С‡РµСЂРµР· yt-dlp.");
   }
 
   return ytResolved;
@@ -1733,32 +1917,32 @@ async function resolveCandidateVideo(url, requestedBy) {
   });
   const track = toYouTubeTrackFromYtDlp(entry, requestedBy, url);
   if (!track?.url) {
-    throw new Error("Пустой ответ от YouTube");
+    throw new Error("РџСѓСЃС‚РѕР№ РѕС‚РІРµС‚ РѕС‚ YouTube");
   }
 
   return track;
 }
 
 async function resolveFromSearch(query, requestedBy) {
-  console.log(`[Resolve] Поиск по тексту: "${query}"`);
+  console.log(`[Resolve] РџРѕРёСЃРє РїРѕ С‚РµРєСЃС‚Сѓ: "${query}"`);
 
   const candidates = await resolveSearchCandidates(query, requestedBy, {
     limit: SEARCH_TRACK_PACK_SIZE,
   }).catch((error) => {
-    console.error(`[Resolve] Ошибка поиска "${query}":`, error.message);
+    console.error(`[Resolve] РћС€РёР±РєР° РїРѕРёСЃРєР° "${query}":`, error.message);
     return [];
   });
 
   const packedTrack = packSearchTracks(candidates, query);
   if (packedTrack) {
-    console.log(`[Resolve] Выбран кандидат из поиска: ${packedTrack.url}; запасных: ${packedTrack.fallbackTracks.length}`);
+    console.log(`[Resolve] Р’С‹Р±СЂР°РЅ РєР°РЅРґРёРґР°С‚ РёР· РїРѕРёСЃРєР°: ${packedTrack.url}; Р·Р°РїР°СЃРЅС‹С…: ${packedTrack.fallbackTracks.length}`);
     return {
       tracks: [packedTrack],
       kind: "youtube_search",
     };
   }
 
-  throw new Error("Не удалось найти трек по запросу.");
+  throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РЅР°Р№С‚Рё С‚СЂРµРє РїРѕ Р·Р°РїСЂРѕСЃСѓ.");
 }
 
 async function resolveTracks(query, requestedBy) {
@@ -1791,7 +1975,7 @@ async function resolveTracks(query, requestedBy) {
         return yandexResolved;
       }
 
-      throw new Error("Не удалось получить метаданные из ссылки Яндекс Музыки (возможно, временная капча/ограничение).");
+      throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РјРµС‚Р°РґР°РЅРЅС‹Рµ РёР· СЃСЃС‹Р»РєРё РЇРЅРґРµРєСЃ РњСѓР·С‹РєРё (РІРѕР·РјРѕР¶РЅРѕ, РІСЂРµРјРµРЅРЅР°СЏ РєР°РїС‡Р°/РѕРіСЂР°РЅРёС‡РµРЅРёРµ).");
     }
 
     const spotifyResolved = await resolveSpotifyUrl(input, requestedBy).catch((error) => {
@@ -1827,7 +2011,7 @@ async function resolveTracks(query, requestedBy) {
 
     if (isVkMusicUrl) {
       throw new Error(
-        "Не удалось открыть VK Music ссылку. Для VK треков/плейлистов без YouTube нужен актуальный VK cookies файл (VK_COOKIES_PATH)."
+        "РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ VK Music СЃСЃС‹Р»РєСѓ. Р”Р»СЏ VK С‚СЂРµРєРѕРІ/РїР»РµР№Р»РёСЃС‚РѕРІ Р±РµР· YouTube РЅСѓР¶РµРЅ Р°РєС‚СѓР°Р»СЊРЅС‹Р№ VK cookies С„Р°Р№Р» (VK_COOKIES_PATH)."
       );
     }
 
@@ -1836,7 +2020,7 @@ async function resolveTracks(query, requestedBy) {
       return externalResolved;
     }
 
-    throw new Error("Ссылка не поддерживается или недоступна без авторизации. Используй YouTube/SoundCloud/Spotify/Deezer либо публичную ссылку.");
+    throw new Error("РЎСЃС‹Р»РєР° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ РёР»Рё РЅРµРґРѕСЃС‚СѓРїРЅР° Р±РµР· Р°РІС‚РѕСЂРёР·Р°С†РёРё. РСЃРїРѕР»СЊР·СѓР№ YouTube/SoundCloud/Spotify/Deezer Р»РёР±Рѕ РїСѓР±Р»РёС‡РЅСѓСЋ СЃСЃС‹Р»РєСѓ.");
   }
 
   return resolveFromSearch(input, requestedBy);
@@ -1846,4 +2030,5 @@ module.exports = {
   resolveTracks,
   resolveSearchCandidates,
 };
+
 
