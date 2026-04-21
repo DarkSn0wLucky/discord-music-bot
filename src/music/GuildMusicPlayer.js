@@ -13,7 +13,16 @@ const {
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { AUTO_DISCONNECT_MS, DEFAULT_VOLUME, MAX_QUEUE_SIZE, VK_COOKIES_PATH, YTDLP_COOKIES_PATH } = require("../config");
+const {
+  AUTO_DISCONNECT_MS,
+  DEFAULT_VOLUME,
+  MAX_QUEUE_SIZE,
+  VK_COOKIES_PATH,
+  YTDLP_BIN,
+  YTDLP_COOKIES_PATH,
+  YTDLP_EXTRACTOR_ARGS,
+  YTDLP_RUNTIME_PATH,
+} = require("../config");
 const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { resolveSearchCandidates } = require("./resolveTrack");
 const { safeLinkText } = require("../utils/format");
@@ -284,7 +293,10 @@ class GuildMusicPlayer {
           ];
 
           if (isYouTubeLike) {
-            ytDlpArgs.push("--extractor-args", "youtube:player_client=android,ios,tv");
+            const extractorArgs = String(YTDLP_EXTRACTOR_ARGS || "").trim();
+            if (extractorArgs) {
+              ytDlpArgs.push("--extractor-args", extractorArgs);
+            }
           }
 
           if (String(next.source || "").toLowerCase().includes("vk")) {
@@ -298,7 +310,18 @@ class GuildMusicPlayer {
 
           ytDlpArgs.push(next.url);
 
-          const ytDlp = spawn("yt-dlp", ytDlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
+          const runtimePath = String(YTDLP_RUNTIME_PATH || "").trim();
+          const ytDlpEnv = runtimePath
+            ? {
+                ...process.env,
+                PATH: `${runtimePath}${path.delimiter}${process.env.PATH || ""}`,
+              }
+            : process.env;
+
+          const ytDlp = spawn(YTDLP_BIN, ytDlpArgs, {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: ytDlpEnv,
+          });
           this.activeStreamProcess = ytDlp;
 
           ytDlp.stderr.on("data", (data) => {
