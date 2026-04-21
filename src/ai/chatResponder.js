@@ -12,6 +12,7 @@ const {
   GEMINI_API_KEY,
   GEMINI_MODEL,
 } = require("../config");
+const { buildAssociationPrompt } = require("./personAssociations");
 
 const DISCORD_MESSAGE_LIMIT = 1900;
 const TYPING_INTERVAL_MS = 4000;
@@ -136,14 +137,22 @@ function buildBatchPrompt(channelName, entries) {
   const lines = entries
     .slice(0, MAX_BATCH_MESSAGES)
     .map((entry, index) => `${index + 1}. ${entry.author}: ${entry.text}`);
+  const associationBlock = buildAssociationPrompt(entries);
 
-  return [
+  const promptParts = [
     `Канал: #${channelName || "чатик-🦍"}.`,
     "Сводка сообщений за последние 60 секунд:",
     ...lines,
-    "",
-    "Ответь одним сообщением в стиле персонажа.",
-  ].join("\n");
+  ];
+
+  if (associationBlock) {
+    promptParts.push("");
+    promptParts.push(associationBlock);
+  }
+
+  promptParts.push("");
+  promptParts.push("Ответь одним сообщением в стиле персонажа.");
+  return promptParts.join("\n");
 }
 
 async function fetchGeminiBatchReply(prompt) {
@@ -278,6 +287,9 @@ async function handleAiMessage(message) {
 
   const state = getOrCreateBatchState(message.channelId);
   state.entries.push({
+    userId: message.author?.id || "",
+    username: message.author?.username || "",
+    globalName: message.author?.globalName || "",
     author: trimText(message.member?.displayName || message.author?.username || "user", 64),
     text,
   });
