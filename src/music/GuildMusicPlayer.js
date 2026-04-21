@@ -28,7 +28,8 @@ const { resolveSearchCandidates } = require("./resolveTrack");
 const { safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
-const PLAY_START_STABILITY_WAIT_MS = 2_500;
+const PLAY_START_TIMEOUT_MS = 15_000;
+const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const cookiesPathCache = new Map();
 
 function resolveConfiguredCookiesPath(configuredPath) {
@@ -332,7 +333,9 @@ class GuildMusicPlayer {
             ytdlpErrorText += `${line}\n`;
 
             if (/ERROR:/i.test(line) || /This video is not available/i.test(line)) {
-              ytdlpFailed = true;
+              if (!hasStartedPlaying) {
+                ytdlpFailed = true;
+              }
             }
           });
 
@@ -351,8 +354,8 @@ class GuildMusicPlayer {
             console.log(`[yt-dlp exited] code=${code} signal=${signal} track=${next.title}`);
 
             if (code !== 0) {
-              ytdlpFailed = true;
               if (!hasStartedPlaying) {
+                ytdlpFailed = true;
                 failedBeforePlaying = true;
               }
             }
@@ -397,22 +400,14 @@ class GuildMusicPlayer {
                 if (!playingStartedAt) {
                   playingStartedAt = Date.now();
                 }
-                if (failedBeforePlaying || ytdlpFailed || (processClosed && processExitCode !== null && processExitCode !== 0)) {
-                  finishReject(
-                    new Error(
-                      ytdlpErrorText.trim() || "Источник завершился с ошибкой до стабильного старта воспроизведения"
-                    )
-                  );
-                  return;
-                }
                 finishResolve();
                 return;
               }
 
-              if (newState.status === AudioPlayerStatus.Idle && !hasStartedPlaying && (ytdlpFailed || processClosed)) {
+              if (newState.status === AudioPlayerStatus.Idle && !hasStartedPlaying) {
                 finishReject(
                   new Error(
-                    ytdlpErrorText.trim() || "РСЃС‚РѕС‡РЅРёРє Р·Р°РєСЂС‹Р» РїРѕС‚РѕРє РґРѕ РЅР°С‡Р°Р»Р° РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёСЏ"
+                    ytdlpErrorText.trim() || "Source stream closed before playback start"
                   )
                 );
               }
@@ -420,48 +415,21 @@ class GuildMusicPlayer {
 
             const timeout = setTimeout(() => {
               if (this.player.state.status === AudioPlayerStatus.Playing || hasStartedPlaying) {
-                if (ytdlpFailed || (processClosed && processExitCode !== null && processExitCode !== 0)) {
-                  finishReject(
-                    new Error(
-                      ytdlpErrorText.trim() || "Источник завершился с ошибкой до стабильного старта воспроизведения"
-                    )
-                  );
-                  return;
-                }
                 finishResolve();
                 return;
               }
 
-              if (ytdlpFailed || processClosed) {
-                finishReject(
-                  new Error(
-                    ytdlpErrorText.trim() || "РќРµ СѓРґР°Р»РѕСЃСЊ РґРѕР¶РґР°С‚СЊСЃСЏ СЃС‚Р°Р±РёР»СЊРЅРѕРіРѕ Р·Р°РїСѓСЃРєР° РїРѕС‚РѕРєР°"
-                  )
-                );
-                return;
-              }
-
-              finishResolve();
-            }, 4000);
+              finishReject(new Error(ytdlpErrorText.trim() || "Source stream closed before stable start"));
+            }, PLAY_START_TIMEOUT_MS);
 
             this.player.on("stateChange", onStateChange);
           });
 
-          await new Promise((resolve) => setTimeout(resolve, PLAY_START_STABILITY_WAIT_MS));
-          const failedWithExitCode = processClosed && processExitCode !== null && processExitCode !== 0;
-          const durationSec = Number(next.durationSec || 0);
-          const longTrack = Number.isFinite(durationSec) ? durationSec > 8 : true;
-          if (
-            failedBeforePlaying ||
-            failedWithExitCode ||
-            ytdlpFailed ||
-            !hasStartedPlaying ||
-            (longTrack && this.player.state.status !== AudioPlayerStatus.Playing)
-          ) {
+          if (failedBeforePlaying || (ytdlpFailed && !hasStartedPlaying) || !hasStartedPlaying) {
             throw new Error(
               ytdlpErrorText.trim() ||
                 (processExitCode !== null && processExitCode !== 0
-                  ? `Источник завершился с ошибкой (code=${processExitCode})`
+                  ? "Source exited with error (code=" + processExitCode + ")"
                   : "Source stream closed before stable start")
             );
           }
@@ -484,6 +452,8 @@ class GuildMusicPlayer {
           console.error(`[Play Error] ${next.title}: ${error.message}`);
           this.cleanupActiveStreamProcess();
           this.currentTrack = null;
+          const retryAttempt = Number(next.retryAttempt || 0);
+          const canRetry = Number.isFinite(retryAttempt) && retryAttempt < MAX_SOURCE_RETRIES_PER_TRACK;
 
           const triedUrls = new Set(
             [next.url, ...(Array.isArray(next.triedUrls) ? next.triedUrls : [])]
@@ -491,7 +461,7 @@ class GuildMusicPlayer {
               .filter((url) => url.length > 0)
           );
           const staticFallbackTracks = uniqueTracksByUrl(next.fallbackTracks, triedUrls, 5);
-          if (staticFallbackTracks.length > 0) {
+          if (canRetry && staticFallbackTracks.length > 0) {
             const [fallbackTrack, ...restFallbacks] = staticFallbackTracks;
             const retryTrack = {
               ...fallbackTrack,
@@ -501,6 +471,7 @@ class GuildMusicPlayer {
               requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
               triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
               dynamicFallbackTried: Boolean(next.dynamicFallbackTried),
+              retryAttempt: retryAttempt + 1,
             };
 
             this.queue.unshift(retryTrack);
@@ -517,6 +488,7 @@ class GuildMusicPlayer {
             String(next.source || "").toLowerCase().includes("youtube");
           const fallbackQuery = String(next.searchQuery || next.title || "").trim();
           if (
+            canRetry &&
             isYouTubeLikeTrack &&
             fallbackQuery &&
             isYouTubeAuthGateError(error.message) &&
@@ -540,6 +512,7 @@ class GuildMusicPlayer {
                 requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
                 triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
                 dynamicFallbackTried: true,
+                retryAttempt: retryAttempt + 1,
               };
 
               this.queue.unshift(retryTrack);

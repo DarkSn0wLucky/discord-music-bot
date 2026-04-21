@@ -75,6 +75,20 @@ const EXTRA_VERSION_KEYWORDS = new Set([
   "РІРµСЂСЃРёСЏ",
 ]);
 
+const NON_MUSIC_KEYWORDS = new Set([
+  "подкаст",
+  "podcast",
+  "интервью",
+  "interview",
+  "shorts",
+  "новости",
+  "news",
+  "реакция",
+  "reaction",
+  "обзор",
+  "review",
+]);
+
 function normalizeInput(raw) {
   return raw.trim().replace(/^<(.+)>$/g, "$1");
 }
@@ -769,6 +783,13 @@ function scoreCandidate(track, queryMeta) {
     }
   }
 
+  let nonMusicPenalty = 0;
+  for (const keyword of NON_MUSIC_KEYWORDS) {
+    if (haystackTokenSet.has(keyword) && !queryMeta.tokenSet.has(keyword)) {
+      nonMusicPenalty += 1;
+    }
+  }
+
   const views = Number(track?.views) || 0;
   const durationSec = Number(track?.durationSec) || 0;
   const tokenCount = queryMeta.tokens.length || 1;
@@ -794,6 +815,7 @@ function scoreCandidate(track, queryMeta) {
 
   score += views > 0 ? Math.log10(views + 1) * viewsWeight : 0;
   score -= extraVersionPenalty * 9;
+  score -= nonMusicPenalty * 24;
   score += hasArtistInTitle ? 6 : 0;
   score -= exactTitleMatch ? 14 : 0;
 
@@ -813,6 +835,14 @@ function scoreCandidate(track, queryMeta) {
   const queryHintsLongVersion = queryMeta.tokenSet.has("live") || queryMeta.tokenSet.has("РєРѕРЅС†РµСЂС‚");
   if (!queryHintsLongVersion && durationSec > 11 * 60) {
     score -= 6;
+  }
+  const queryHintsNonMusic =
+    queryMeta.tokenSet.has("подкаст") ||
+    queryMeta.tokenSet.has("podcast") ||
+    queryMeta.tokenSet.has("интервью") ||
+    queryMeta.tokenSet.has("interview");
+  if (!queryHintsNonMusic && durationSec > 20 * 60) {
+    score -= 22;
   }
   if (durationSec > 0 && durationSec < 50) {
     score -= 6;
