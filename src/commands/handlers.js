@@ -7,7 +7,6 @@ const {
   ComponentType,
   EmbedBuilder,
   MessageFlags,
-  PermissionsBitField,
   UserSelectMenuBuilder,
 } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
@@ -23,6 +22,10 @@ const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
 const VOICE_PANEL_PREFIX = "voicepanel";
 const VOICE_PANEL_STATE_TTL_MS = 30 * 60_000;
 const voicePanelStateByMessageId = new Map();
+const VOICE_PANEL_OWNER_LOGIN = String(process.env.VOICE_PANEL_OWNER_LOGIN || "darksnowlucky")
+  .trim()
+  .toLowerCase();
+const VOICE_PANEL_OWNER_ID = String(process.env.VOICE_PANEL_OWNER_ID || "").trim();
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -362,21 +365,29 @@ function cleanupVoicePanelState() {
   }
 }
 
-function canUseVoicePanel(interaction) {
-  const perms = interaction.memberPermissions;
-  if (!perms) {
+function isVoicePanelOwner(interaction) {
+  const user = interaction?.user;
+  if (!user) {
     return false;
   }
 
-  if (perms.has(PermissionsBitField.Flags.Administrator)) {
+  if (VOICE_PANEL_OWNER_ID && user.id === VOICE_PANEL_OWNER_ID) {
     return true;
   }
 
-  return (
-    perms.has(PermissionsBitField.Flags.MuteMembers) ||
-    perms.has(PermissionsBitField.Flags.DeafenMembers) ||
-    perms.has(PermissionsBitField.Flags.MoveMembers)
-  );
+  if (!VOICE_PANEL_OWNER_LOGIN) {
+    return false;
+  }
+
+  const aliases = [user.username, user.globalName, interaction?.member?.displayName]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+
+  return aliases.includes(VOICE_PANEL_OWNER_LOGIN);
+}
+
+function canUseVoicePanel(interaction) {
+  return isVoicePanelOwner(interaction);
 }
 
 function buildVoicePanelCustomId(type, ownerId, action = "") {
@@ -577,7 +588,7 @@ async function handleVoicePanel(interaction) {
 
   if (!canUseVoicePanel(interaction)) {
     await interaction.reply({
-      content: "Нужны права администратора или voice-модерации (Mute/Deafen/Move Members).",
+      content: "Эта панель доступна только для `darksnowlucky`.",
       ...EPHEMERAL_REPLY,
     });
     return;
@@ -625,7 +636,7 @@ async function handleVoicePanelComponent(interaction) {
   if (!canUseVoicePanel(interaction)) {
     await interaction
       .reply({
-        content: "Нужны права администратора или voice-модерации (Mute/Deafen/Move Members).",
+        content: "Эта панель доступна только для `darksnowlucky`.",
         ...EPHEMERAL_REPLY,
       })
       .catch(() => null);
