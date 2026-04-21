@@ -3,6 +3,7 @@ const path = require("path");
 const { Client, GatewayIntentBits, MessageFlags, Partials } = require("discord.js");
 const { assertEnv, DISCORD_TOKEN } = require("./config");
 const { handleButton, handleChatInput, handleVoicePanelComponent } = require("./commands/handlers");
+const { handleAiMessage } = require("./ai/chatResponder");
 const { MusicManager } = require("./music/MusicManager");
 const { initSourceAuth } = require("./music/sourceAuth");
 
@@ -29,7 +30,12 @@ process.on("unhandledRejection", (reason) => {
 assertEnv(["DISCORD_TOKEN"]);
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Channel],
 });
 
@@ -78,6 +84,14 @@ client.on("interactionCreate", async (interaction) => {
     } else {
       await interaction.reply(payload).catch(() => null);
     }
+  }
+});
+
+client.on("messageCreate", async (message) => {
+  try {
+    await handleAiMessage(message);
+  } catch (error) {
+    console.error("[AI message error]", error);
   }
 });
 

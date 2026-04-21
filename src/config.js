@@ -11,6 +11,32 @@ function asNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "disabled"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function asList(value) {
+  if (!value) {
+    return [];
+  }
+
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function assertEnv(keys) {
   const missing = keys.filter((key) => !process.env[key]);
   if (missing.length > 0) {
@@ -65,5 +91,16 @@ module.exports = {
   MAX_PLAYLIST_ITEMS: asNumber(process.env.MAX_PLAYLIST_ITEMS, 50),
   AUTO_DISCONNECT_MS: asNumber(process.env.AUTO_DISCONNECT_MS, 180_000),
   DEFAULT_VOLUME: asNumber(process.env.DEFAULT_VOLUME, 0.75),
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+  GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  AI_CHAT_ENABLED: asBoolean(process.env.AI_CHAT_ENABLED, false),
+  AI_ALLOWED_CHANNEL_IDS: asList(process.env.AI_ALLOWED_CHANNEL_IDS || ""),
+  AI_MAX_PROMPT_CHARS: asNumber(process.env.AI_MAX_PROMPT_CHARS, 550),
+  AI_MAX_OUTPUT_CHARS: asNumber(process.env.AI_MAX_OUTPUT_CHARS, 650),
+  AI_REQUEST_TIMEOUT_MS: asNumber(process.env.AI_REQUEST_TIMEOUT_MS, 20_000),
+  AI_TEMPERATURE: asNumber(process.env.AI_TEMPERATURE, 0.9),
+  AI_TOP_P: asNumber(process.env.AI_TOP_P, 0.95),
+  AI_COOLDOWN_MS: asNumber(process.env.AI_COOLDOWN_MS, 1200),
+  AI_MAX_CONTEXT_MESSAGES: asNumber(process.env.AI_MAX_CONTEXT_MESSAGES, 8),
   assertEnv,
 };
