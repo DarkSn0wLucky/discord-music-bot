@@ -3,6 +3,7 @@ const {
   AI_CHAT_CHANNEL_ID,
   AI_CHAT_CHANNEL_NAME,
   AI_CHAT_ENABLED,
+  AI_GEMINI_MAX_OUTPUT_TOKENS,
   AI_MAX_OUTPUT_CHARS,
   AI_MAX_PROMPT_CHARS,
   AI_REQUEST_TIMEOUT_MS,
@@ -48,38 +49,6 @@ function sanitizeDiscordMentions(value) {
   return String(value || "")
     .replace(/@everyone/gi, "@\u200beveryone")
     .replace(/@here/gi, "@\u200bhere");
-}
-
-function countWords(value) {
-  return String(value || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
-}
-
-function isLikelyUnfinishedReply(value) {
-  const text = String(value || "").trim();
-  if (!text) {
-    return true;
-  }
-
-  const words = countWords(text);
-  if (words < 5) {
-    return true;
-  }
-
-  if (/[,:;\-–—]$/.test(text)) {
-    return true;
-  }
-
-  const lastWord = text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .split(/\s+/)
-    .pop();
-  const danglingWords = new Set(["и", "или", "но", "а", "что", "чтоб", "чтобы", "как", "ты"]);
-  return danglingWords.has(lastWord);
 }
 
 function isAiEnabled() {
@@ -193,7 +162,7 @@ async function fetchGeminiBatchReply(prompt) {
           parts: [
             {
               text:
-                "Ты персонаж: дерзкий парень 16 лет с дворовым вайбом, колкий и ироничный. Пиши по-русски, коротко (1-4 предложения), реагируй на общий вайб сводки. Ответ всегда должен быть законченным, без обрыва фразы. Допускается резкий тон и уличный сленг, но без реальных угроз насилия, без травли и без призывов к вреду.",
+                "Ты персонаж: дерзкий парень 16 лет с дворовым вайбом, колкий и ироничный. Пиши по-русски, коротко (1-4 предложения), реагируй на общий вайб сводки. Допускается резкий тон и уличный сленг, но без реальных угроз насилия, без травли и без призывов к вреду.",
             },
           ],
         },
@@ -206,7 +175,7 @@ async function fetchGeminiBatchReply(prompt) {
         generationConfig: {
           temperature: clamp(AI_TEMPERATURE, 0, 2, 0.9),
           topP: clamp(AI_TOP_P, 0, 1, 0.95),
-          maxOutputTokens: 260,
+          maxOutputTokens: clamp(AI_GEMINI_MAX_OUTPUT_TOKENS, 256, 8192, 1024),
         },
       }),
     });
@@ -217,7 +186,8 @@ async function fetchGeminiBatchReply(prompt) {
       throw new Error(errorMessage);
     }
 
-    const text = (payload?.candidates?.[0]?.content?.parts || [])
+    const candidate = payload?.candidates?.[0] || {};
+    const text = (candidate?.content?.parts || [])
       .map((part) => (typeof part?.text === "string" ? part.text : ""))
       .join("\n")
       .trim();
@@ -226,7 +196,11 @@ async function fetchGeminiBatchReply(prompt) {
       throw new Error("Empty Gemini response");
     }
 
-    return text;
+    return {
+      text,
+      finishReason: String(candidate?.finishReason || ""),
+      promptFeedback: payload?.promptFeedback || null,
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -245,10 +219,16 @@ async function generateBatchReply(channel, entries) {
       channel.sendTyping().catch(() => null);
     }, TYPING_INTERVAL_MS);
 
-    let rawReply = await fetchGeminiBatchReply(prompt);
-    if (isLikelyUnfinishedReply(rawReply)) {
-      rawReply = await fetchGeminiBatchReply(
-        `${prompt}\n\nТребование: дай завершённый, цельный ответ без обрыва в конце.`
+    const generation = await fetchGeminiBatchReply(prompt);
+    const rawReply = generation.text;
+    if (generation.finishReason && generation.finishReason !== "STOP") {
+      console.warn(
+        `[AI] finishReason=${generation.finishReason} channel=${channel.id} entries=${entries.length}`
+      );
+    }
+    if (generation.promptFeedback?.blockReason) {
+      console.warn(
+        `[AI] prompt blocked reason=${generation.promptFeedback.blockReason} channel=${channel.id}`
       );
     }
 

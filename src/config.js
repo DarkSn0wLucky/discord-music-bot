@@ -100,6 +100,7 @@ module.exports = {
   AI_BATCH_WINDOW_MS: asNumber(process.env.AI_BATCH_WINDOW_MS, 60_000),
   AI_MAX_PROMPT_CHARS: asNumber(process.env.AI_MAX_PROMPT_CHARS, 550),
   AI_MAX_OUTPUT_CHARS: asNumber(process.env.AI_MAX_OUTPUT_CHARS, 650),
+  AI_GEMINI_MAX_OUTPUT_TOKENS: asNumber(process.env.AI_GEMINI_MAX_OUTPUT_TOKENS, 1024),
   AI_REQUEST_TIMEOUT_MS: asNumber(process.env.AI_REQUEST_TIMEOUT_MS, 20_000),
   AI_TEMPERATURE: asNumber(process.env.AI_TEMPERATURE, 0.9),
   AI_TOP_P: asNumber(process.env.AI_TOP_P, 0.95),
