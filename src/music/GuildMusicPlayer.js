@@ -28,7 +28,7 @@ const { resolveSearchCandidates } = require("./resolveTrack");
 const { safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
-const PLAY_START_TIMEOUT_MS = 15_000;
+const PLAY_START_TIMEOUT_MS = 20_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const cookiesPathCache = new Map();
 
@@ -77,6 +77,23 @@ function isYouTubeAuthGateError(message) {
   }
 
   return /(sign in to confirm you.?re not a bot|http error 403|forbidden|login required)/i.test(String(message));
+}
+
+function prettifyPlaybackError(message) {
+  const value = String(message || "").trim();
+  if (!value) {
+    return "Не удалось запустить источник.";
+  }
+
+  if (/Source stream closed before playback start/i.test(value)) {
+    return "Источник закрыл поток до начала воспроизведения.";
+  }
+
+  if (/Playback start timeout/i.test(value)) {
+    return "Источник не успел запуститься вовремя.";
+  }
+
+  return value;
 }
 
 function uniqueTracksByUrl(tracks, excludedUrls = new Set(), limit = Infinity) {
@@ -370,8 +387,6 @@ class GuildMusicPlayer {
             resource.volume.setVolume(DEFAULT_VOLUME);
           }
 
-          this.player.play(resource);
-
           await new Promise((resolve, reject) => {
             let settled = false;
 
@@ -419,18 +434,31 @@ class GuildMusicPlayer {
                 return;
               }
 
-              finishReject(new Error(ytdlpErrorText.trim() || "Source stream closed before stable start"));
+              finishReject(new Error(ytdlpErrorText.trim() || "Playback start timeout"));
             }, PLAY_START_TIMEOUT_MS);
 
             this.player.on("stateChange", onStateChange);
+
+            try {
+              this.player.play(resource);
+            } catch (playError) {
+              finishReject(playError);
+            }
           });
+
+          if (!hasStartedPlaying && this.player.state.status === AudioPlayerStatus.Playing) {
+            hasStartedPlaying = true;
+            if (!playingStartedAt) {
+              playingStartedAt = Date.now();
+            }
+          }
 
           if (failedBeforePlaying || (ytdlpFailed && !hasStartedPlaying) || !hasStartedPlaying) {
             throw new Error(
               ytdlpErrorText.trim() ||
                 (processExitCode !== null && processExitCode !== 0
                   ? "Source exited with error (code=" + processExitCode + ")"
-                  : "Source stream closed before stable start")
+                  : "Source stream closed before playback start")
             );
           }
 
@@ -526,7 +554,7 @@ class GuildMusicPlayer {
           }
 
           const actionTitle = isSourceUnavailableError(error.message) ? "Трек недоступен" : "Трек пропущен";
-          await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${error.message}\``);
+          await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${prettifyPlaybackError(error.message)}\``);
         }
       }
 
@@ -543,6 +571,10 @@ class GuildMusicPlayer {
       if (this.queue.length === 0) {
         this.scheduleAutoDisconnect();
       }
+      return;
+    }
+
+    if (this.transitionLock && !this.currentTrack.startedAt) {
       return;
     }
 
