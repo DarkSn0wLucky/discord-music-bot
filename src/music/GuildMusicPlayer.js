@@ -225,6 +225,8 @@ class GuildMusicPlayer {
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
+          let processExitCode = null;
+          let failedBeforePlaying = false;
           let hasStartedPlaying = false;
           const cookiesPath = resolveYtDlpCookiesPath(next);
           const isYouTubeLike =
@@ -288,10 +290,14 @@ class GuildMusicPlayer {
               this.activeStreamProcess = null;
             }
             processClosed = true;
+            processExitCode = code;
             console.log(`[yt-dlp exited] code=${code} signal=${signal} track=${next.title}`);
 
             if (code !== 0) {
               ytdlpFailed = true;
+              if (!hasStartedPlaying) {
+                failedBeforePlaying = true;
+              }
             }
           });
 
@@ -331,6 +337,14 @@ class GuildMusicPlayer {
             const onStateChange = (oldState, newState) => {
               if (newState.status === AudioPlayerStatus.Playing) {
                 hasStartedPlaying = true;
+                if (failedBeforePlaying) {
+                  finishReject(
+                    new Error(
+                      ytdlpErrorText.trim() || "Источник завершился с ошибкой до стабильного старта воспроизведения"
+                    )
+                  );
+                  return;
+                }
                 finishResolve();
                 return;
               }
@@ -366,8 +380,16 @@ class GuildMusicPlayer {
           });
 
           await new Promise((resolve) => setTimeout(resolve, 1200));
-          if (!hasStartedPlaying && (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed)) {
-            throw new Error(ytdlpErrorText.trim() || "Source stream closed before stable start");
+          if (
+            failedBeforePlaying ||
+            (!hasStartedPlaying && (this.player.state.status !== AudioPlayerStatus.Playing || ytdlpFailed || processClosed))
+          ) {
+            throw new Error(
+              ytdlpErrorText.trim() ||
+                (processExitCode !== null && processExitCode !== 0
+                  ? `Источник завершился с ошибкой (code=${processExitCode})`
+                  : "Source stream closed before stable start")
+            );
           }
 
           if (this.currentTrack) {
