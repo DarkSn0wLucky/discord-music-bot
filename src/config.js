@@ -18,6 +18,30 @@ function assertEnv(keys) {
   }
 }
 
+function normalizeYtExtractorArgs(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "youtube:player_client=android,web,mweb";
+  }
+
+  const playerClientMatch = raw.match(/youtube:player_client=([^\s]+)/i);
+  if (!playerClientMatch) {
+    return raw;
+  }
+
+  const clients = playerClientMatch[1]
+    .split(",")
+    .map((client) => client.trim())
+    .filter(Boolean);
+
+  if (!clients.some((client) => client.toLowerCase() === "android")) {
+    clients.unshift("android");
+  }
+
+  const uniqueClients = [...new Set(clients.map((client) => client.toLowerCase()))];
+  return raw.replace(playerClientMatch[0], `youtube:player_client=${uniqueClients.join(",")}`);
+}
+
 module.exports = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN || "",
   DISCORD_CLIENT_ID: process.env.DISCORD_CLIENT_ID || "",
@@ -34,7 +58,7 @@ module.exports = {
   YTDLP_COOKIES_PATH: process.env.YTDLP_COOKIES_PATH || "cookies.txt",
   YTDLP_BIN: process.env.YTDLP_BIN || "yt-dlp",
   YTDLP_RUNTIME_PATH: process.env.YTDLP_RUNTIME_PATH || "",
-  YTDLP_EXTRACTOR_ARGS: process.env.YTDLP_EXTRACTOR_ARGS || "youtube:player_client=web",
+  YTDLP_EXTRACTOR_ARGS: normalizeYtExtractorArgs(process.env.YTDLP_EXTRACTOR_ARGS),
   VK_COOKIES_PATH: process.env.VK_COOKIES_PATH || "",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
   MAX_QUEUE_SIZE: asNumber(process.env.MAX_QUEUE_SIZE, 150),
