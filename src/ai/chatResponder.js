@@ -17,7 +17,6 @@ const { buildAssociationPrompt } = require("./personAssociations");
 const DISCORD_MESSAGE_LIMIT = 1900;
 const TYPING_INTERVAL_MS = 4000;
 const MAX_BATCH_MESSAGES = 80;
-const MIN_PARTICIPANTS_TO_REPLY = 2;
 const CONVO_NEAR_MS = 25_000;
 
 const pendingBatchesByChannel = new Map();
@@ -424,9 +423,6 @@ async function sendGroupedReplies(channel, entries) {
   }
 
   const uniqueUsers = Array.from(new Set(entries.map((entry) => entry.userId).filter(Boolean)));
-  if (uniqueUsers.length < MIN_PARTICIPANTS_TO_REPLY) {
-    return;
-  }
 
   const sortedEntries = entries
     .filter((entry) => entry?.userId)
@@ -551,4 +547,3 @@ async function handleAiMessage(message) {
 module.exports = {
   handleAiMessage,
 };
-
