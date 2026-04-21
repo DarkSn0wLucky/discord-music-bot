@@ -2,7 +2,7 @@ const ffmpegPath = require("ffmpeg-static");
 const path = require("path");
 const { Client, GatewayIntentBits, MessageFlags, Partials } = require("discord.js");
 const { assertEnv, DISCORD_TOKEN } = require("./config");
-const { handleButton, handleChatInput } = require("./commands/handlers");
+const { handleButton, handleChatInput, handleVoicePanelComponent } = require("./commands/handlers");
 const { MusicManager } = require("./music/MusicManager");
 const { initSourceAuth } = require("./music/sourceAuth");
 
@@ -54,6 +54,14 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith("music:")) {
       await handleButton(interaction, manager);
+      return;
+    }
+
+    if (
+      (interaction.isButton() || interaction.isUserSelectMenu() || interaction.isChannelSelectMenu()) &&
+      interaction.customId.startsWith("voicepanel:")
+    ) {
+      await handleVoicePanelComponent(interaction);
     }
   } catch (error) {
     console.error("[Interaction error]", error);

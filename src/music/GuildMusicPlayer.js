@@ -30,6 +30,7 @@ const { safeLinkText } = require("../utils/format");
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
 const PLAY_START_TIMEOUT_MS = 20_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
+const ACTION_DEDUPE_WINDOW_MS = 4_000;
 const cookiesPathCache = new Map();
 
 function resolveConfiguredCookiesPath(configuredPath) {
@@ -140,6 +141,9 @@ class GuildMusicPlayer {
     this.updateInterval = null;
     this.updateTimeout = null;
     this.activeStreamProcess = null;
+    this.panelOperationQueue = Promise.resolve();
+    this.lastActionSignature = "";
+    this.lastActionAt = 0;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -760,43 +764,101 @@ class GuildMusicPlayer {
     }
   }
 
+  runPanelOperation(operation) {
+    const run = async () => operation();
+    const next = this.panelOperationQueue.then(run, run);
+    this.panelOperationQueue = next.catch(() => null);
+    return next;
+  }
+
+  async findLatestPanelMessage(channel, limit = 40) {
+    const messages = await channel.messages.fetch({ limit }).catch(() => null);
+    if (!messages) {
+      return null;
+    }
+
+    const panelMessages = [...messages.values()]
+      .filter((message) => this.isMusicPanelMessage(message))
+      .sort((left, right) => right.createdTimestamp - left.createdTimestamp);
+
+    return panelMessages[0] || null;
+  }
+
+  async pruneDuplicatePanels(channel, keepMessageId = null) {
+    const messages = await channel.messages.fetch({ limit: 40 }).catch(() => null);
+    if (!messages) {
+      return;
+    }
+
+    const panelMessages = [...messages.values()].filter((message) => this.isMusicPanelMessage(message));
+    for (const panelMessage of panelMessages) {
+      if (keepMessageId && panelMessage.id === keepMessageId) {
+        continue;
+      }
+      await panelMessage.delete().catch(() => {});
+    }
+  }
+
   async refreshPanel(options = {}) {
-    const { moveToBottom = false } = options;
-    const channel = await this.getTextChannel();
-    if (!channel) return;
+    return this.runPanelOperation(async () => {
+      const { moveToBottom = false } = options;
+      const channel = await this.getTextChannel();
+      if (!channel) return;
 
-    const payload = {
-      embeds: [buildPlayerEmbed(this)],
-      components: [buildControlsRow(this)],
-    };
+      const payload = {
+        embeds: [buildPlayerEmbed(this)],
+        components: [buildControlsRow(this)],
+      };
 
-    if (this.panelMessageId && !moveToBottom) {
-      try {
-        const message = await channel.messages.fetch(this.panelMessageId);
-        await message.edit(payload);
-        return;
-      } catch {
-        this.panelMessageId = null;
-      }
-    }
-
-    if (this.panelMessageId && moveToBottom) {
-      try {
-        const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
-        if (message) {
-          await message.delete().catch(() => {});
+      if (this.panelMessageId && !moveToBottom) {
+        try {
+          const message = await channel.messages.fetch(this.panelMessageId);
+          await message.edit(payload);
+          return;
+        } catch {
+          this.panelMessageId = null;
         }
-      } finally {
-        this.panelMessageId = null;
       }
-    }
 
-    try {
-      const message = await channel.send(payload);
-      this.panelMessageId = message.id;
-    } catch (error) {
-      console.error(`[Panel:${this.guild.id}] РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РїСЂР°РІРёС‚СЊ РїР°РЅРµР»СЊ:`, error.message);
-    }
+      if (!this.panelMessageId && !moveToBottom) {
+        const latestPanel = await this.findLatestPanelMessage(channel, 30);
+        if (latestPanel) {
+          this.panelMessageId = latestPanel.id;
+          try {
+            await latestPanel.edit(payload);
+            await this.pruneDuplicatePanels(channel, latestPanel.id);
+            return;
+          } catch {
+            this.panelMessageId = null;
+          }
+        }
+      }
+
+      if (moveToBottom) {
+        if (this.panelMessageId) {
+          try {
+            const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+            if (message) {
+              await message.delete().catch(() => {});
+            }
+          } finally {
+            this.panelMessageId = null;
+          }
+        } else {
+          await this.pruneDuplicatePanels(channel, null);
+        }
+      }
+
+      try {
+        const message = await channel.send(payload);
+        this.panelMessageId = message.id;
+        if (moveToBottom) {
+          await this.pruneDuplicatePanels(channel, message.id);
+        }
+      } catch (error) {
+        console.error(`[Panel:${this.guild.id}] Panel update failed:`, error.message);
+      }
+    });
   }
 
   async sendQueue() {
@@ -808,7 +870,32 @@ class GuildMusicPlayer {
   async sendAction(title, description, options = {}) {
     const channel = await this.getTextChannel();
     if (!channel) return;
+
+    const dedupeWindowMs = Number(options.dedupeWindowMs);
+    const effectiveDedupeMs =
+      Number.isFinite(dedupeWindowMs) && dedupeWindowMs >= 0
+        ? dedupeWindowMs
+        : ACTION_DEDUPE_WINDOW_MS;
+    const dedupeKey = String(options.dedupeKey || `${title || ""}|${description || ""}`)
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (
+      effectiveDedupeMs > 0 &&
+      dedupeKey &&
+      this.lastActionSignature === dedupeKey &&
+      Date.now() - this.lastActionAt < effectiveDedupeMs
+    ) {
+      return;
+    }
+
     const message = await channel.send({ embeds: [buildActionEmbed(title, description)] });
+    if (dedupeKey) {
+      this.lastActionSignature = dedupeKey;
+      this.lastActionAt = Date.now();
+    }
+
     const autoDeleteMs = Number(options.autoDeleteMs);
     if (Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
       setTimeout(() => {
@@ -854,24 +941,27 @@ class GuildMusicPlayer {
   }
 
   async clearPanel() {
-    if (!this.panelMessageId) return;
-
-    const channel = await this.getTextChannel();
-    if (!channel) {
-      this.panelMessageId = null;
-      return;
-    }
-
-    try {
-      const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
-      if (message) {
-        await message.delete().catch(() => {});
+    return this.runPanelOperation(async () => {
+      const channel = await this.getTextChannel();
+      if (!channel) {
+        this.panelMessageId = null;
+        return;
       }
-    } catch (err) {
-      console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
-    } finally {
-      this.panelMessageId = null;
-    }
+
+      try {
+        if (this.panelMessageId) {
+          const message = await channel.messages.fetch(this.panelMessageId).catch(() => null);
+          if (message) {
+            await message.delete().catch(() => {});
+          }
+        }
+        await this.pruneDuplicatePanels(channel, null);
+      } catch (err) {
+        console.error(`[Panel:${this.guild.id}] Clear panel error:`, err.message);
+      } finally {
+        this.panelMessageId = null;
+      }
+    });
   }
 
   isMusicPanelMessage(message) {
@@ -890,20 +980,15 @@ class GuildMusicPlayer {
   }
 
   async clearRecentPanels() {
-    const channel = await this.getTextChannel();
-    if (!channel) {
-      return;
-    }
+    return this.runPanelOperation(async () => {
+      const channel = await this.getTextChannel();
+      if (!channel) {
+        return;
+      }
 
-    const messages = await channel.messages.fetch({ limit: 40 }).catch(() => null);
-    if (!messages) {
-      return;
-    }
-
-    const panelMessages = [...messages.values()].filter((message) => this.isMusicPanelMessage(message));
-    for (const panelMessage of panelMessages) {
-      await panelMessage.delete().catch(() => {});
-    }
+      await this.pruneDuplicatePanels(channel, null);
+      this.panelMessageId = null;
+    });
   }
 }
 

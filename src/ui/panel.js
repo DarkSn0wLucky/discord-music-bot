@@ -48,8 +48,7 @@ function buildPlayerEmbed(player) {
       { name: "Длина очереди", value: String(player.queue.length), inline: true },
       { name: "TIME", value: `${progressBar(elapsedMs, durationMs)}\n${durationText}` },
       { name: "Дальше в очереди", value: queuePreview }
-    )
-    .setFooter({ text: `Запросил ${track.requestedByTag}` });
+    );
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);

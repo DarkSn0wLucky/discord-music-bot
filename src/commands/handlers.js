@@ -1,4 +1,15 @@
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, MessageFlags } = require("discord.js");
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelSelectMenuBuilder,
+  ChannelType,
+  ComponentType,
+  EmbedBuilder,
+  MessageFlags,
+  PermissionsBitField,
+  UserSelectMenuBuilder,
+} = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrack");
 const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
@@ -9,6 +20,9 @@ const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
 const PLAY_REQUEST_TIMEOUT_MS = 30_000;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
+const VOICE_PANEL_PREFIX = "voicepanel";
+const VOICE_PANEL_STATE_TTL_MS = 30 * 60_000;
+const voicePanelStateByMessageId = new Map();
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -337,6 +351,435 @@ async function withPlayer(interaction, manager) {
     await player.setTextChannel(interaction.channelId);
   }
   return player;
+}
+
+function cleanupVoicePanelState() {
+  const now = Date.now();
+  for (const [messageId, state] of voicePanelStateByMessageId.entries()) {
+    if (!state || now - Number(state.updatedAt || 0) > VOICE_PANEL_STATE_TTL_MS) {
+      voicePanelStateByMessageId.delete(messageId);
+    }
+  }
+}
+
+function canUseVoicePanel(interaction) {
+  const perms = interaction.memberPermissions;
+  if (!perms) {
+    return false;
+  }
+
+  if (perms.has(PermissionsBitField.Flags.Administrator)) {
+    return true;
+  }
+
+  return (
+    perms.has(PermissionsBitField.Flags.MuteMembers) ||
+    perms.has(PermissionsBitField.Flags.DeafenMembers) ||
+    perms.has(PermissionsBitField.Flags.MoveMembers)
+  );
+}
+
+function buildVoicePanelCustomId(type, ownerId, action = "") {
+  if (type === "action") {
+    return `${VOICE_PANEL_PREFIX}:action:${action}:${ownerId}`;
+  }
+
+  return `${VOICE_PANEL_PREFIX}:${type}:${ownerId}`;
+}
+
+function parseVoicePanelCustomId(customId) {
+  const parts = String(customId || "").split(":");
+  if (parts[0] !== VOICE_PANEL_PREFIX) {
+    return null;
+  }
+
+  if (parts[1] === "action" && parts.length >= 4) {
+    return {
+      type: "action",
+      action: parts[2],
+      ownerId: parts[3],
+    };
+  }
+
+  if ((parts[1] === "user" || parts[1] === "move") && parts.length >= 3) {
+    return {
+      type: parts[1],
+      ownerId: parts[2],
+    };
+  }
+
+  return null;
+}
+
+function buildVoicePanelComponents(ownerId, hasTarget = false) {
+  const userRow = new ActionRowBuilder().addComponents(
+    new UserSelectMenuBuilder()
+      .setCustomId(buildVoicePanelCustomId("user", ownerId))
+      .setPlaceholder("Выбери участника")
+      .setMinValues(1)
+      .setMaxValues(1)
+  );
+
+  const actionRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "mute"))
+      .setLabel("Замутить")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasTarget),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "unmute"))
+      .setLabel("Размутить")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasTarget),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "deafen"))
+      .setLabel("Уши OFF")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasTarget),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "undeafen"))
+      .setLabel("Уши ON")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasTarget),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "disconnect"))
+      .setLabel("Кик из войса")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!hasTarget)
+  );
+
+  const moveRow = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder()
+      .setCustomId(buildVoicePanelCustomId("move", ownerId))
+      .setPlaceholder("Переместить в канал")
+      .setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+      .setMinValues(1)
+      .setMaxValues(1)
+      .setDisabled(!hasTarget)
+  );
+
+  const utilityRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "clear"))
+      .setLabel("Сбросить выбор")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasTarget),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "refresh"))
+      .setLabel("Обновить")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return [userRow, actionRow, moveRow, utilityRow];
+}
+
+function buildVoicePanelEmbed({ guild, targetMember, lastAction = "" }) {
+  const targetLabel = targetMember ? `<@${targetMember.id}>` : "Не выбран";
+  const voiceChannelLabel = targetMember?.voice?.channelId
+    ? `<#${targetMember.voice.channelId}>`
+    : "Не в голосовом";
+  const muteLabel = targetMember ? (targetMember.voice.serverMute ? "Да" : "Нет") : "—";
+  const deafLabel = targetMember ? (targetMember.voice.serverDeaf ? "Да" : "Нет") : "—";
+
+  const embed = new EmbedBuilder()
+    .setColor(0x4da3ff)
+    .setTitle("Voice Панель")
+    .setDescription("Эту панель видишь только ты.")
+    .addFields(
+      { name: "Сервер", value: safeLinkText(guild?.name || "Unknown"), inline: true },
+      { name: "Цель", value: targetLabel, inline: true },
+      { name: "Канал", value: voiceChannelLabel, inline: true },
+      { name: "Server Mute", value: muteLabel, inline: true },
+      { name: "Server Deaf", value: deafLabel, inline: true },
+      { name: "Последнее действие", value: lastAction || "—", inline: false }
+    )
+    .setTimestamp(new Date());
+
+  return embed;
+}
+
+async function resolveVoicePanelTargetMember(guild, state) {
+  if (!state?.targetUserId) {
+    return null;
+  }
+
+  const member = await guild.members.fetch(state.targetUserId).catch(() => null);
+  return member || null;
+}
+
+function ensureVoiceTargetForAction(targetMember, actionName) {
+  if (!targetMember) {
+    return "Сначала выбери участника.";
+  }
+
+  if (!targetMember.voice?.channelId) {
+    return `Участник ${safeLinkText(targetMember.user?.tag || targetMember.displayName || targetMember.id)} не в голосовом канале.`;
+  }
+
+  if (actionName === "disconnect" && !targetMember.voice.channelId) {
+    return "Участник уже не в голосовом канале.";
+  }
+
+  return "";
+}
+
+async function executeVoicePanelAction({ action, targetMember, actor, destinationChannel }) {
+  const reason = `Voice panel by ${actor.tag} (${actor.id})`;
+
+  if (action === "refresh") {
+    return "Панель обновлена.";
+  }
+
+  if (action === "clear") {
+    return "Выбор участника сброшен.";
+  }
+
+  const targetName = safeLinkText(targetMember.displayName || targetMember.user?.tag || targetMember.id);
+
+  if (action === "mute") {
+    await targetMember.voice.setMute(true, reason);
+    return `🔇 ${targetName} замучен.`;
+  }
+
+  if (action === "unmute") {
+    await targetMember.voice.setMute(false, reason);
+    return `🔊 ${targetName} размучен.`;
+  }
+
+  if (action === "deafen") {
+    await targetMember.voice.setDeaf(true, reason);
+    return `🎧 ${targetName}: уши выключены.`;
+  }
+
+  if (action === "undeafen") {
+    await targetMember.voice.setDeaf(false, reason);
+    return `🎧 ${targetName}: уши включены.`;
+  }
+
+  if (action === "disconnect") {
+    await targetMember.voice.setChannel(null, reason);
+    return `⛔ ${targetName} отключён от войса.`;
+  }
+
+  if (action === "move") {
+    await targetMember.voice.setChannel(destinationChannel, reason);
+    return `➡️ ${targetName} перемещён в <#${destinationChannel.id}>.`;
+  }
+
+  return "Неизвестное действие.";
+}
+
+async function handleVoicePanel(interaction) {
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: "Команда доступна только на сервере.", ...EPHEMERAL_REPLY });
+    return;
+  }
+
+  if (!canUseVoicePanel(interaction)) {
+    await interaction.reply({
+      content: "Нужны права администратора или voice-модерации (Mute/Deafen/Move Members).",
+      ...EPHEMERAL_REPLY,
+    });
+    return;
+  }
+
+  cleanupVoicePanelState();
+  await interaction.reply({
+    embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember: null })],
+    components: buildVoicePanelComponents(interaction.user.id, false),
+    ...EPHEMERAL_REPLY,
+  });
+
+  const panelMessage = await interaction.fetchReply().catch(() => null);
+  if (!panelMessage?.id) {
+    return;
+  }
+
+  voicePanelStateByMessageId.set(panelMessage.id, {
+    ownerId: interaction.user.id,
+    guildId: interaction.guildId,
+    targetUserId: null,
+    lastAction: "",
+    updatedAt: Date.now(),
+  });
+}
+
+async function handleVoicePanelComponent(interaction) {
+  const parsed = parseVoicePanelCustomId(interaction.customId);
+  if (!parsed) {
+    return false;
+  }
+
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: "Компонент доступен только на сервере.", ...EPHEMERAL_REPLY }).catch(() => null);
+    return true;
+  }
+
+  if (interaction.user.id !== parsed.ownerId) {
+    await interaction
+      .reply({ content: `Эта панель доступна только <@${parsed.ownerId}>.`, ...EPHEMERAL_REPLY })
+      .catch(() => null);
+    return true;
+  }
+
+  if (!canUseVoicePanel(interaction)) {
+    await interaction
+      .reply({
+        content: "Нужны права администратора или voice-модерации (Mute/Deafen/Move Members).",
+        ...EPHEMERAL_REPLY,
+      })
+      .catch(() => null);
+    return true;
+  }
+
+  cleanupVoicePanelState();
+  const messageId = interaction.message?.id;
+  if (!messageId) {
+    await interaction.reply({ content: "Панель не найдена. Запусти /voicepanel снова.", ...EPHEMERAL_REPLY }).catch(() => null);
+    return true;
+  }
+
+  const state = voicePanelStateByMessageId.get(messageId) || {
+    ownerId: parsed.ownerId,
+    guildId: interaction.guildId,
+    targetUserId: null,
+    lastAction: "",
+    updatedAt: Date.now(),
+  };
+
+  if (parsed.type === "user") {
+    const targetUserId = interaction.values?.[0] || null;
+    state.targetUserId = targetUserId;
+    state.lastAction = targetUserId ? `Выбран <@${targetUserId}>.` : "Выбор сброшен.";
+    state.updatedAt = Date.now();
+    voicePanelStateByMessageId.set(messageId, state);
+
+    const targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
+    if (!targetMember && state.targetUserId) {
+      state.targetUserId = null;
+      state.lastAction = "Участник не найден на сервере.";
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+    }
+
+    await interaction
+      .update({
+        embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+      })
+      .catch(() => null);
+    return true;
+  }
+
+  let targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
+  if (!targetMember && state.targetUserId) {
+    state.targetUserId = null;
+    state.lastAction = "Выбранный участник не найден на сервере.";
+  }
+
+  if (parsed.type === "move") {
+    if (!targetMember) {
+      await interaction.reply({ content: "Сначала выбери участника.", ...EPHEMERAL_REPLY }).catch(() => null);
+      return true;
+    }
+
+    const destinationId = interaction.values?.[0];
+    const destinationChannel =
+      interaction.guild.channels.cache.get(destinationId) ||
+      (await interaction.guild.channels.fetch(destinationId).catch(() => null));
+
+    if (
+      !destinationChannel ||
+      ![ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(destinationChannel.type)
+    ) {
+      await interaction.reply({ content: "Выбран неверный голосовой канал.", ...EPHEMERAL_REPLY }).catch(() => null);
+      return true;
+    }
+
+    const targetError = ensureVoiceTargetForAction(targetMember, "move");
+    if (targetError) {
+      await interaction.reply({ content: targetError, ...EPHEMERAL_REPLY }).catch(() => null);
+      return true;
+    }
+
+    try {
+      const actionText = await executeVoicePanelAction({
+        action: "move",
+        targetMember,
+        actor: interaction.user,
+        destinationChannel,
+      });
+      state.lastAction = actionText;
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+    } catch (error) {
+      state.lastAction = `Ошибка: ${error.message}`;
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+    }
+
+    targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
+    await interaction
+      .update({
+        embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+      })
+      .catch(() => null);
+    return true;
+  }
+
+  if (parsed.type === "action") {
+    const action = parsed.action;
+    if (action === "clear") {
+      state.targetUserId = null;
+      state.lastAction = "Выбор участника сброшен.";
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+
+      await interaction
+        .update({
+          embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember: null, lastAction: state.lastAction })],
+          components: buildVoicePanelComponents(state.ownerId, false),
+        })
+        .catch(() => null);
+      return true;
+    }
+
+    if (action !== "refresh") {
+      const targetError = ensureVoiceTargetForAction(targetMember, action);
+      if (targetError) {
+        await interaction.reply({ content: targetError, ...EPHEMERAL_REPLY }).catch(() => null);
+        return true;
+      }
+    }
+
+    try {
+      const actionText = await executeVoicePanelAction({
+        action,
+        targetMember,
+        actor: interaction.user,
+        destinationChannel: null,
+      });
+      state.lastAction = actionText;
+    } catch (error) {
+      state.lastAction = `Ошибка: ${error.message}`;
+    }
+
+    state.updatedAt = Date.now();
+    voicePanelStateByMessageId.set(messageId, state);
+    targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
+
+    await interaction
+      .update({
+        embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+      })
+      .catch(() => null);
+    return true;
+  }
+
+  await interaction.reply({ content: "Неизвестный элемент панели.", ...EPHEMERAL_REPLY }).catch(() => null);
+  return true;
 }
 
 async function handlePlay(interaction, manager) {
@@ -710,6 +1153,11 @@ async function handleButton(interaction, manager) {
 }
 
 async function handleChatInput(interaction, manager) {
+  if (interaction.commandName === "voicepanel") {
+    await handleVoicePanel(interaction);
+    return;
+  }
+
   if (!(await ensureMusicChannel(interaction))) {
     return;
   }
@@ -765,4 +1213,5 @@ async function handleChatInput(interaction, manager) {
 module.exports = {
   handleChatInput,
   handleButton,
+  handleVoicePanelComponent,
 };

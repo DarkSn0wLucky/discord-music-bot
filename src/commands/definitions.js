@@ -5,7 +5,10 @@ const definitions = [
     .setName("play")
     .setDescription("Добавить трек по ссылке или запросу")
     .addStringOption((option) =>
-      option.setName("query").setDescription("Ссылка (YouTube/SC/Spotify/VK/Yandex) или текст запроса").setRequired(true)
+      option
+        .setName("query")
+        .setDescription("Ссылка (YouTube/SC/Spotify/VK/Yandex) или текст запроса")
+        .setRequired(true)
     ),
   new SlashCommandBuilder().setName("skip").setDescription("Пропустить текущий трек"),
   new SlashCommandBuilder().setName("pause").setDescription("Пауза"),
@@ -14,6 +17,7 @@ const definitions = [
   new SlashCommandBuilder().setName("queue").setDescription("Показать очередь"),
   new SlashCommandBuilder().setName("nowplaying").setDescription("Показать текущий трек"),
   new SlashCommandBuilder().setName("shuffle").setDescription("Перемешать очередь"),
+  new SlashCommandBuilder().setName("voicepanel").setDescription("Личная панель управления голосом"),
   new SlashCommandBuilder()
     .setName("loop")
     .setDescription("Режим повтора")
