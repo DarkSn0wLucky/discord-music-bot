@@ -2,11 +2,11 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelSelectMenuBuilder,
   ChannelType,
   ComponentType,
   EmbedBuilder,
   MessageFlags,
+  StringSelectMenuBuilder,
   UserSelectMenuBuilder,
 } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
@@ -422,7 +422,31 @@ function parseVoicePanelCustomId(customId) {
   return null;
 }
 
-function buildVoicePanelComponents(ownerId, hasTarget = false) {
+function buildVoiceMoveOptions(guild) {
+  if (!guild?.channels?.cache) {
+    return [];
+  }
+
+  return guild.channels.cache
+    .filter((channel) => channel && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type))
+    .sort((left, right) => {
+      const byPosition = Number(left.rawPosition || 0) - Number(right.rawPosition || 0);
+      if (byPosition !== 0) {
+        return byPosition;
+      }
+      return String(left.name || "").localeCompare(String(right.name || ""));
+    })
+    .map((channel) => ({
+      label: truncate(channel.name || `voice-${channel.id}`, 80),
+      value: channel.id,
+      description: channel.type === ChannelType.GuildStageVoice ? "Stage channel" : "Voice channel",
+    }))
+    .slice(0, 25);
+}
+
+function buildVoicePanelComponents(ownerId, guild, hasTarget = false) {
+  const moveOptions = buildVoiceMoveOptions(guild);
+
   const userRow = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
       .setCustomId(buildVoicePanelCustomId("user", ownerId))
@@ -460,13 +484,17 @@ function buildVoicePanelComponents(ownerId, hasTarget = false) {
   );
 
   const moveRow = new ActionRowBuilder().addComponents(
-    new ChannelSelectMenuBuilder()
+    new StringSelectMenuBuilder()
       .setCustomId(buildVoicePanelCustomId("move", ownerId))
-      .setPlaceholder("Переместить в канал")
-      .setChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+      .setPlaceholder(moveOptions.length ? "Переместить в любой voice-канал" : "Нет voice-каналов")
       .setMinValues(1)
       .setMaxValues(1)
-      .setDisabled(!hasTarget)
+      .setDisabled(!hasTarget || moveOptions.length === 0)
+      .addOptions(
+        moveOptions.length
+          ? moveOptions
+          : [{ label: "Нет голосовых каналов", value: "none", description: "Создай voice-канал" }]
+      )
   );
 
   const utilityRow = new ActionRowBuilder().addComponents(
@@ -597,7 +625,7 @@ async function handleVoicePanel(interaction) {
   cleanupVoicePanelState();
   await interaction.reply({
     embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember: null })],
-    components: buildVoicePanelComponents(interaction.user.id, false),
+    components: buildVoicePanelComponents(interaction.user.id, interaction.guild, false),
     ...EPHEMERAL_REPLY,
   });
 
@@ -676,7 +704,7 @@ async function handleVoicePanelComponent(interaction) {
     await interaction
       .update({
         embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
-        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+        components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember)),
       })
       .catch(() => null);
     return true;
@@ -695,6 +723,11 @@ async function handleVoicePanelComponent(interaction) {
     }
 
     const destinationId = interaction.values?.[0];
+    if (!destinationId || destinationId === "none") {
+      await interaction.reply({ content: "Нет доступного канала для перемещения.", ...EPHEMERAL_REPLY }).catch(() => null);
+      return true;
+    }
+
     const destinationChannel =
       interaction.guild.channels.cache.get(destinationId) ||
       (await interaction.guild.channels.fetch(destinationId).catch(() => null));
@@ -733,7 +766,7 @@ async function handleVoicePanelComponent(interaction) {
     await interaction
       .update({
         embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
-        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+        components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember)),
       })
       .catch(() => null);
     return true;
@@ -750,7 +783,7 @@ async function handleVoicePanelComponent(interaction) {
       await interaction
         .update({
           embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember: null, lastAction: state.lastAction })],
-          components: buildVoicePanelComponents(state.ownerId, false),
+          components: buildVoicePanelComponents(state.ownerId, interaction.guild, false),
         })
         .catch(() => null);
       return true;
@@ -783,7 +816,7 @@ async function handleVoicePanelComponent(interaction) {
     await interaction
       .update({
         embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
-        components: buildVoicePanelComponents(state.ownerId, Boolean(targetMember)),
+        components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember)),
       })
       .catch(() => null);
     return true;

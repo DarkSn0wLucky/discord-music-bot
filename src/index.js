@@ -58,7 +58,10 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (
-      (interaction.isButton() || interaction.isUserSelectMenu() || interaction.isChannelSelectMenu()) &&
+      (interaction.isButton() ||
+        interaction.isUserSelectMenu() ||
+        interaction.isStringSelectMenu() ||
+        interaction.isChannelSelectMenu()) &&
       interaction.customId.startsWith("voicepanel:")
     ) {
       await handleVoicePanelComponent(interaction);
