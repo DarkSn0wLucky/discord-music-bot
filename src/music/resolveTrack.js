@@ -12,7 +12,10 @@ const {
   SPOTIFY_REFRESH_TOKEN,
   VK_COOKIES_PATH,
   YOUTUBE_API_KEY,
+  YTDLP_BIN,
   YTDLP_COOKIES_PATH,
+  YTDLP_EXTRACTOR_ARGS,
+  YTDLP_RUNTIME_PATH,
 } = require("../config");
 
 const SEARCH_RESULTS_LIMIT = 8;
@@ -1401,6 +1404,10 @@ async function resolveYoutubeUrlViaYtDlp(url, requestedBy) {
 function fetchYtDlpJson(url, options = {}) {
   return new Promise((resolve, reject) => {
     const flatPlaylist = options.flatPlaylist !== false;
+    const normalizedTarget = String(url || "").trim().toLowerCase();
+    const isYouTubeTarget =
+      normalizedTarget.startsWith("ytsearch") ||
+      /(?:youtube\.com|youtu\.be)/i.test(normalizedTarget);
     const args = [
       "--dump-single-json",
       "--no-warnings",
@@ -1408,6 +1415,13 @@ function fetchYtDlpJson(url, options = {}) {
       "--user-agent",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
     ];
+
+    if (isYouTubeTarget) {
+      const extractorArgs = String(YTDLP_EXTRACTOR_ARGS || "").trim();
+      if (extractorArgs) {
+        args.push("--extractor-args", extractorArgs);
+      }
+    }
 
     if (flatPlaylist) {
       args.push("--flat-playlist");
@@ -1425,13 +1439,22 @@ function fetchYtDlpJson(url, options = {}) {
 
     args.push(String(url));
 
+    const runtimePath = String(YTDLP_RUNTIME_PATH || "").trim();
+    const executionEnv = runtimePath
+      ? {
+          ...process.env,
+          PATH: `${runtimePath}${path.delimiter}${process.env.PATH || ""}`,
+        }
+      : process.env;
+
     execFile(
-      "yt-dlp",
+      YTDLP_BIN,
       args,
       {
         windowsHide: true,
         timeout: Number(options.timeoutMs) || 25_000,
         maxBuffer: 8 * 1024 * 1024,
+        env: executionEnv,
       },
       (error, stdout, stderr) => {
         const output = String(stdout || "").trim();
