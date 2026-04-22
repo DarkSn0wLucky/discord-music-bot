@@ -25,6 +25,9 @@ const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
 const METADATA_RESOLVE_CONCURRENCY = 3;
+const METADATA_ITEM_RESOLVE_TIMEOUT_MS = 12_000;
+const PLAYLIST_RESOLVE_BUDGET_MS = 45_000;
+const PLAYLIST_FAST_MODE_THRESHOLD = 40;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 const networkCheckCache = new Map();
@@ -929,7 +932,8 @@ function rankCandidatesByQuery(candidates, query) {
   return pool.map((entry) => entry.track);
 }
 
-async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_RESOLVE_LIMIT) {
+async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_RESOLVE_LIMIT, options = {}) {
+  const allowYtdlpFallback = options.allowYtdlpFallback !== false;
   const selectedUrls = urls.slice(0, Math.max(1, maxCount));
   if (selectedUrls.length === 0) {
     return [];
@@ -987,6 +991,10 @@ async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_
     return !resolved.some((track) => extractYouTubeVideoId(track.url) === id);
   });
 
+  if (!allowYtdlpFallback) {
+    return resolved;
+  }
+
   const settled = await Promise.allSettled(unresolvedUrls.map((url) => resolveCandidateVideo(url, requestedBy)));
 
   settled.forEach((result, index) => {
@@ -1005,14 +1013,16 @@ async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_
   return resolved;
 }
 
-async function resolveTrackByMetadataQuery(query, requestedBy) {
+async function resolveTrackByMetadataQuery(query, requestedBy, options = {}) {
   const normalizedQuery = String(query || "").trim();
   if (!normalizedQuery) {
     return null;
   }
 
+  const allowYtdlpFallback = options.allowYtdlpFallback !== false;
   const candidates = await resolveSearchCandidates(normalizedQuery, requestedBy, {
     limit: SEARCH_TRACK_PACK_SIZE,
+    allowYtdlpFallback,
   }).catch(() => []);
 
   return packSearchTracks(candidates, normalizedQuery);
@@ -1026,7 +1036,7 @@ async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
 
   const accept = typeof options.accept === "function" ? options.accept : () => true;
   for (const query of uniqueQueries) {
-    const track = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
+    const track = await resolveTrackByMetadataQuery(query, requestedBy, options).catch(() => null);
     if (!track) {
       continue;
     }
@@ -1123,6 +1133,8 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
     return [];
   }
 
+  const startedAt = Date.now();
+  const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const results = new Array(sourceItems.length).fill(null);
   const queryCache = new Map();
   let cursor = 0;
@@ -1130,6 +1142,10 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
 
   async function worker() {
     while (true) {
+      if (Date.now() - startedAt >= PLAYLIST_RESOLVE_BUDGET_MS) {
+        return;
+      }
+
       const index = cursor;
       cursor += 1;
       if (index >= sourceItems.length) {
@@ -1154,9 +1170,27 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
       }
 
       const primaryQuery = queries[0];
-      const resolvedTrack =
-        (await resolveTrackByQueryVariants(queries, requestedBy).catch(() => null)) ||
-        (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
+      const resolvePromise = (async () => {
+        if (fastMode) {
+          return resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
+            allowYtdlpFallback: false,
+          }).catch(() => null);
+        }
+
+        return (
+          (await resolveTrackByQueryVariants(queries, requestedBy, {
+            allowYtdlpFallback: false,
+          }).catch(() => null)) ||
+          (await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
+            allowYtdlpFallback: false,
+          }).catch(() => null))
+        );
+      })();
+
+      const resolvedTrack = await Promise.race([
+        resolvePromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), METADATA_ITEM_RESOLVE_TIMEOUT_MS)),
+      ]);
 
       if (resolvedTrack) {
         queryCache.set(cacheKey, resolvedTrack);
@@ -2106,6 +2140,7 @@ async function searchYoutubeViaYtDlp(query, requestedBy, limit) {
 
 async function resolveSearchCandidates(query, requestedBy, options = {}) {
   const limit = Math.max(1, Math.min(10, Number(options.limit) || 5));
+  const allowYtdlpFallback = options.allowYtdlpFallback !== false;
   const normalizedQuery = normalizeInput(query);
 
   if (!normalizedQuery) {
@@ -2134,7 +2169,12 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
   ]);
 
   const apiUrls = [...new Set([...apiByRelevance, ...apiByViews])].filter((url) => !seenUrls.has(url));
-  const apiResolvedTracks = await resolveCandidateVideosFromUrls(apiUrls, requestedBy, Math.min(targetSearchSize, API_RESOLVE_LIMIT));
+  const apiResolvedTracks = await resolveCandidateVideosFromUrls(
+    apiUrls,
+    requestedBy,
+    Math.min(targetSearchSize, API_RESOLVE_LIMIT),
+    { allowYtdlpFallback }
+  );
 
   for (const track of apiResolvedTracks) {
     if (!track?.url || seenUrls.has(track.url)) {
@@ -2145,7 +2185,7 @@ async function resolveSearchCandidates(query, requestedBy, options = {}) {
     seenUrls.add(track.url);
   }
 
-  if (uniqueCandidates.length < limit) {
+  if (allowYtdlpFallback && uniqueCandidates.length < limit) {
     const ytDlpCandidates = await searchYoutubeViaYtDlp(normalizedQuery, requestedBy, targetSearchSize);
     for (const track of ytDlpCandidates) {
       if (!track?.url || seenUrls.has(track.url)) {
