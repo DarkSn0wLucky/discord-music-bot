@@ -1,6 +1,6 @@
 const { ChannelType } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
-const { buildPanelComponents, buildPlayerEmbed } = require("../ui/panel");
+const { buildPanelComponents } = require("../ui/panel");
 const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
 const DEFAULT_MUSIC_CHANNEL_NAME = "музыка";
@@ -118,7 +118,7 @@ class MusicManager {
 
     await channel
       .send({
-        embeds: [buildPlayerEmbed(idlePlayer)],
+        content: "Нажми кнопку ниже, чтобы включить музыку.",
         components: buildPanelComponents(idlePlayer),
       })
       .catch(() => null);
