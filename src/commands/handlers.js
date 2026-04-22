@@ -866,6 +866,9 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
   }
 
   await interaction.deferReply();
+  const progress = createPlayProgressReporter(interaction);
+  await progress.update(1, "Принял запрос");
+  await progress.update(5, "Ожидаю очередь обработки");
   let interactionTimedOut = false;
   let thinkingTimer = null;
   if (HAS_PLAY_REQUEST_TIMEOUT) {
@@ -908,17 +911,20 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
+      await progress.update(12, "Разбираю запрос");
       ensurePlayActive();
       const isDirectUrl = isUrlLike(query);
       let tracksToAdd = [];
 
       if (isDirectUrl) {
+        await progress.update(30, "Получаю данные по ссылке");
         const resolved = await runWithPlayTimeout(resolveTracks(query, interaction.user));
         ensurePlayActive();
         tracksToAdd = resolved.tracks;
 
         if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
           const primaryTrack = tracksToAdd[0];
+          await progress.update(48, "Ищу похожие варианты");
           const extraCandidates = await runWithPlayTimeout(
             resolveSearchCandidates(primaryTrack.searchQuery, interaction.user, {
               limit: 8,
@@ -929,6 +935,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
           if (candidates.length > 1) {
             clearThinkingTimer();
+            progress.stop();
             const selectedTrack = await pickTrackFromMenu(interaction, primaryTrack.searchQuery, candidates);
             if (!selectedTrack) return;
 
@@ -943,15 +950,18 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           }
         }
       } else {
+        await progress.update(35, "Ищу подходящие треки");
         const candidates = await runWithPlayTimeout(resolveSearchCandidates(query, interaction.user, { limit: 5 }));
         ensurePlayActive();
         if (!candidates.length) {
           clearThinkingTimer();
+          progress.stop();
           await interaction.editReply("\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.");
           return;
         }
 
         clearThinkingTimer();
+        progress.stop();
         const selectedTrack = await pickTrackFromMenu(interaction, query, candidates);
         if (!selectedTrack) return;
 
@@ -962,20 +972,24 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
       if (!tracksToAdd.length) {
         clearThinkingTimer();
+        progress.stop();
         await interaction.editReply("\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e \u043f\u043e \u0437\u0430\u043f\u0440\u043e\u0441\u0443.");
         return;
       }
 
+      await progress.update(70, "Подключаюсь к голосовому каналу");
       const player = manager.getOrCreate(interaction.guild);
       await player.setTextChannel(interaction.channelId);
       await runWithPlayTimeout(player.connect(memberVoice));
       ensurePlayActive();
       const wasQueueEmpty = !player.currentTrack && !player.transitionLock && player.queue.length === 0;
 
+      await progress.update(85, "Добавляю трек в очередь");
       ensurePlayActive();
       const { accepted, dropped } = player.addTracks(tracksToAdd);
       if (accepted === 0) {
         clearThinkingTimer();
+        progress.stop();
         await interaction.editReply(
           "\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0430, \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043d\u043e\u0432\u044b\u0435 \u0442\u0440\u0435\u043a\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435\u043b\u044c\u0437\u044f."
         );
@@ -987,6 +1001,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         accepted === 1
           ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
           : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
+      await progress.update(95, "Запускаю воспроизведение");
       const startedNow = await runWithPlayTimeout(player.playIfIdle());
 
       if (wasQueueEmpty) {
@@ -994,6 +1009,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           await player.refreshPanel();
         }
         clearThinkingTimer();
+        progress.stop();
         await clearDeferredReply(interaction);
         return;
       }
@@ -1001,7 +1017,9 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       const dropHint =
         dropped > 0 ? `\n\u041d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0438\u0437-\u0437\u0430 \u043b\u0438\u043c\u0438\u0442\u0430 \u043e\u0447\u0435\u0440\u0435\u0434\u0438: ${dropped}` : "";
       const requestedBy = first?.requestedById ? `<@${first.requestedById}>` : safeLinkText(first?.requestedByTag || "unknown");
+      await progress.update(100, "Готово");
       clearThinkingTimer();
+      progress.stop();
       await interaction.editReply({
         embeds: [
           buildActionEmbed(
@@ -1017,10 +1035,13 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       }
 
       clearThinkingTimer();
+      progress.stop();
       console.error("[Command:/play]", error);
       await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`);
     } finally {
       clearThinkingTimer();
+      progress.stop();
+      await progress.wait();
     }
   });
 }
@@ -1294,6 +1315,69 @@ async function handleChatInput(interaction, manager) {
       "Slash-\u043a\u043e\u043c\u0430\u043d\u0434\u044b \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u043a\u043d\u043e\u043f\u043a\u0438 \u043c\u0443\u0437\u044b\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438.",
     ...EPHEMERAL_REPLY,
   });
+}
+
+function buildPercentBar(percent, size = 20) {
+  const clamped = Math.max(1, Math.min(100, Math.round(Number(percent) || 1)));
+  const filled = Math.max(1, Math.min(size, Math.round((clamped / 100) * size)));
+  return `[${"#".repeat(filled)}${"-".repeat(Math.max(0, size - filled))}]`;
+}
+
+function createPlayProgressReporter(interaction) {
+  let active = true;
+  let lastPercent = 0;
+  let lastText = "";
+  let lastUpdateAt = 0;
+  let queue = Promise.resolve();
+
+  const update = async (percent, text) => {
+    if (!active) {
+      return;
+    }
+
+    const clamped = Math.max(1, Math.min(100, Math.round(Number(percent) || 1)));
+    const normalizedText = String(text || "Обрабатываю запрос...");
+    const now = Date.now();
+
+    if (
+      clamped === lastPercent &&
+      normalizedText === lastText &&
+      now - lastUpdateAt < 1200
+    ) {
+      return;
+    }
+
+    lastPercent = clamped;
+    lastText = normalizedText;
+    lastUpdateAt = now;
+    const bar = buildPercentBar(clamped);
+
+    queue = queue.finally(() =>
+      interaction
+        .editReply({
+          embeds: [
+            buildActionEmbed(
+              "Обработка запроса",
+              `${safeLinkText(normalizedText)}\n\`${bar}\` **${clamped}%**`
+            ),
+          ],
+          components: [],
+        })
+        .catch(() => null)
+    );
+
+    await queue;
+  };
+
+  return {
+    update,
+    stop: () => {
+      active = false;
+    },
+    wait: async () => {
+      await queue.catch(() => null);
+    },
+  };
 }
 
 module.exports = {
