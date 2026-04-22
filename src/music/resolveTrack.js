@@ -11,6 +11,7 @@ const {
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REFRESH_TOKEN,
   VK_COOKIES_PATH,
+  YANDEX_PLAYLIST_HINTS,
   YOUTUBE_API_KEY,
   YTDLP_BIN,
   YTDLP_COOKIES_PATH,
@@ -27,6 +28,7 @@ const METADATA_RESOLVE_CONCURRENCY = 3;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 const networkCheckCache = new Map();
+const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
 
 function limitItems(list, limit) {
   const items = Array.isArray(list) ? list : [];
@@ -34,6 +36,35 @@ function limitItems(list, limit) {
     return items.slice();
   }
   return items.slice(0, Math.floor(limit));
+}
+
+function parseYandexPlaylistHints(raw) {
+  const map = new Map();
+  const value = String(raw || "").trim();
+  if (!value) {
+    return map;
+  }
+
+  const entries = value
+    .split(/[,\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const [uuidPart, targetPart] = entry.split("=").map((part) => String(part || "").trim());
+    if (!uuidPart || !targetPart) {
+      continue;
+    }
+
+    const [owner, kind] = targetPart.split(":").map((part) => String(part || "").trim());
+    if (!owner || !kind) {
+      continue;
+    }
+
+    map.set(uuidPart.toLowerCase(), { owner, kind });
+  }
+
+  return map;
 }
 
 const QUERY_STOPWORDS = new Set([
@@ -603,6 +634,8 @@ function isGenericLandingTitle(value) {
   }
 
   const blockedPhrases = [
+    "яндекс музыка",
+    "яндекс музыка собираем музыку для вас",
     "СЏРЅРґРµРєСЃ РјСѓР·С‹РєР°",
     "СЏРЅРґРµРєСЃ РјСѓР·С‹РєР° СЃРѕР±РёСЂР°РµРј РјСѓР·С‹РєСѓ РґР»СЏ РІР°СЃ",
     "yandex music",
@@ -1323,6 +1356,14 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     return null;
   }
 
+  const hint = yandexPlaylistHintMap.get(String(info.playlistUuid || "").toLowerCase());
+  if (hint?.owner && hint?.kind) {
+    return {
+      owner: hint.owner,
+      kind: hint.kind,
+    };
+  }
+
   const response = await requestTextWithRedirect(originalUrl, {
     timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
     headers: {
@@ -1338,7 +1379,15 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     return null;
   }
 
-  return parseYandexPlaylistTargetFromHtml(response.body);
+  const resolvedTarget = parseYandexPlaylistTargetFromHtml(response.body);
+  if (resolvedTarget?.owner && resolvedTarget?.kind && info.playlistUuid) {
+    yandexPlaylistHintMap.set(String(info.playlistUuid).toLowerCase(), {
+      owner: String(resolvedTarget.owner),
+      kind: String(resolvedTarget.kind),
+    });
+  }
+
+  return resolvedTarget;
 }
 
 async function fetchYandexPlaylistData(origin, owner, kind) {
@@ -2231,11 +2280,6 @@ async function resolveTracks(query, requestedBy) {
       });
       if (yandexResolved) {
         return yandexResolved;
-      }
-
-      const yandexExternalFallback = await resolveGenericExternalUrl(input, requestedBy);
-      if (yandexExternalFallback) {
-        return yandexExternalFallback;
       }
 
       throw new Error(

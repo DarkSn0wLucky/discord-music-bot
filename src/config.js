@@ -128,5 +128,6 @@ module.exports = {
   AI_TOP_P: asNumber(process.env.AI_TOP_P, 0.95),
   AI_COOLDOWN_MS: asNumber(process.env.AI_COOLDOWN_MS, 1200),
   AI_MAX_CONTEXT_MESSAGES: asNumber(process.env.AI_MAX_CONTEXT_MESSAGES, 8),
+  YANDEX_PLAYLIST_HINTS: process.env.YANDEX_PLAYLIST_HINTS || "",
   assertEnv,
 };
