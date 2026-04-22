@@ -2,36 +2,8 @@ const { SlashCommandBuilder } = require("discord.js");
 
 const definitions = [
   new SlashCommandBuilder()
-    .setName("play")
-    .setDescription("Добавить трек по ссылке или запросу")
-    .addStringOption((option) =>
-      option
-        .setName("query")
-        .setDescription("Ссылка (YouTube/SC/Spotify/VK/Yandex) или текст запроса")
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder().setName("skip").setDescription("Пропустить текущий трек"),
-  new SlashCommandBuilder().setName("pause").setDescription("Поставить на паузу"),
-  new SlashCommandBuilder().setName("resume").setDescription("Продолжить воспроизведение"),
-  new SlashCommandBuilder().setName("stop").setDescription("Остановить музыку и очистить очередь"),
-  new SlashCommandBuilder().setName("queue").setDescription("Показать очередь"),
-  new SlashCommandBuilder().setName("nowplaying").setDescription("Показать текущий трек"),
-  new SlashCommandBuilder().setName("shuffle").setDescription("Перемешать очередь"),
-  new SlashCommandBuilder().setName("voicepanel").setDescription("Личная панель управления голосом"),
-  new SlashCommandBuilder()
-    .setName("loop")
-    .setDescription("Режим повтора")
-    .addStringOption((option) =>
-      option
-        .setName("mode")
-        .setDescription("Выбери режим цикла")
-        .setRequired(true)
-        .addChoices(
-          { name: "Выкл", value: "off" },
-          { name: "Трек", value: "track" },
-          { name: "Очередь", value: "queue" }
-        )
-    ),
+    .setName("leave")
+    .setDescription("\u041e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0431\u043e\u0442\u0430 \u043e\u0442 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0433\u043e \u043a\u0430\u043d\u0430\u043b\u0430"),
 ];
 
 const commandData = definitions.map((definition) => definition.toJSON());

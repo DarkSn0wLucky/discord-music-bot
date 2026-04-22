@@ -14,7 +14,6 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const {
-  AUTO_DISCONNECT_MS,
   DEFAULT_VOLUME,
   MAX_QUEUE_SIZE,
   VK_COOKIES_PATH,
@@ -674,16 +673,62 @@ class GuildMusicPlayer {
     this.cleanupActiveStreamProcess();
     this.player.stop(true);
 
+    await this.refreshPanel({ moveToBottom: true });
+
+    return hadTracks
+      ? {
+          ok: true,
+          message:
+            "\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u043e\u0447\u0438\u0449\u0435\u043d\u0430.",
+        }
+      : {
+          ok: false,
+          message:
+            "\u041e\u0447\u0435\u0440\u0435\u0434\u044c \u0443\u0436\u0435 \u043f\u0443\u0441\u0442\u0430.",
+        };
+  }
+
+  async leave() {
+    const hadConnection = Boolean(this.connection);
+    const hadTracks = Boolean(this.currentTrack) || this.queue.length > 0;
+
+    this.stopProgressUpdater();
+    this.clearAutoDisconnect();
+    this.queue = [];
+    this.currentTrack = null;
+    this.forceSkip = true;
+    this.suppressNextTrackAction = false;
+    this.preservePanelOnNextTrack = false;
+    this.cleanupActiveStreamProcess();
+    this.player.stop(true);
+
     await this.disconnectFromVoice(false);
     await this.refreshPanel({ moveToBottom: true });
     this.disposeIfIdle();
 
+    if (!hadConnection) {
+      return {
+        ok: false,
+        message:
+          "\u0411\u043e\u0442 \u0443\u0436\u0435 \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u043a \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u043c\u0443 \u043a\u0430\u043d\u0430\u043b\u0443.",
+      };
+    }
+
     return hadTracks
-      ? { ok: true, message: "РћС‡РµСЂРµРґСЊ РѕС‡РёС‰РµРЅР°, Р±РѕС‚ РѕС‚РєР»СЋС‡С‘РЅ." }
-      : { ok: false, message: "РћС‡РµСЂРµРґСЊ СѓР¶Рµ РїСѓСЃС‚Р°." };
+      ? {
+          ok: true,
+          message:
+            "\u0411\u043e\u0442 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d \u043e\u0442 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0433\u043e \u043a\u0430\u043d\u0430\u043b\u0430, \u043e\u0447\u0435\u0440\u0435\u0434\u044c \u043e\u0447\u0438\u0449\u0435\u043d\u0430.",
+        }
+      : {
+          ok: true,
+          message:
+            "\u0411\u043e\u0442 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d \u043e\u0442 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0433\u043e \u043a\u0430\u043d\u0430\u043b\u0430.",
+        };
   }
 
   async shuffle() {
+
     if (this.queue.length < 2) {
       return { ok: false, message: "Р”Р»СЏ С€Р°С„Р»Р° РЅСѓР¶РЅРѕ РјРёРЅРёРјСѓРј 2 С‚СЂРµРєР° РІ РѕС‡РµСЂРµРґРё." };
     }
@@ -730,20 +775,11 @@ class GuildMusicPlayer {
   }
 
   scheduleAutoDisconnect() {
-    if (!this.connection || AUTO_DISCONNECT_MS <= 0 || this.autoDisconnectTimer) return;
-
-    this.autoDisconnectTimer = setTimeout(async () => {
-      this.autoDisconnectTimer = null;
-
-      if (this.currentTrack || this.queue.length > 0 || !this.connection) return;
-
-      await this.disconnectFromVoice(true, "РџСѓСЃС‚Р°СЏ РѕС‡РµСЂРµРґСЊ Р±РѕР»РµРµ 3 РјРёРЅСѓС‚.");
-      await this.refreshPanel();
-      this.disposeIfIdle();
-    }, AUTO_DISCONNECT_MS);
+    this.clearAutoDisconnect();
   }
 
   clearAutoDisconnect() {
+
     if (!this.autoDisconnectTimer) return;
     clearTimeout(this.autoDisconnectTimer);
     this.autoDisconnectTimer = null;

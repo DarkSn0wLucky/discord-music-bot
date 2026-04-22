@@ -337,15 +337,6 @@ async function clearDeferredReply(interaction) {
   await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null);
 }
 
-async function sendStoppedByNotice(player, user) {
-  await player
-    .sendAction(
-      "Музыка остановлена",
-      `Сессию завершил <@${user.id}>`
-    )
-    .catch(() => null);
-}
-
 function isSameVoiceWithBot(interaction, player) {
   const memberVoiceId = interaction.member?.voice?.channelId;
   if (!memberVoiceId) {
@@ -1098,7 +1089,34 @@ async function handleStop(interaction, manager) {
   const result = await player.stop();
 
   if (result.ok) {
-    await sendStoppedByNotice(player, interaction.user);
+    await interaction.deleteReply().catch(() => null);
+    return;
+  }
+
+  await interaction.editReply(result.message);
+}
+
+async function handleLeave(interaction, manager) {
+  const player = manager.get(interaction.guild.id);
+  if (!player) {
+    await interaction.reply({
+      content:
+        "\u0411\u043e\u0442 \u0443\u0436\u0435 \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u043a \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u043c\u0443 \u043a\u0430\u043d\u0430\u043b\u0443.",
+      ...EPHEMERAL_REPLY,
+    });
+    return;
+  }
+
+  const voiceCheck = isSameVoiceWithBot(interaction, player);
+  if (!voiceCheck.ok) {
+    await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
+    return;
+  }
+
+  await interaction.deferReply({ ...EPHEMERAL_REPLY });
+  const result = await player.leave();
+
+  if (result.ok) {
     await interaction.deleteReply().catch(() => null);
     return;
   }
@@ -1207,7 +1225,6 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.stop) {
     const result = await player.stop();
     if (result.ok) {
-      await sendStoppedByNotice(player, interaction.user);
       return;
     }
 
@@ -1251,61 +1268,16 @@ async function handleModalSubmit(interaction, manager) {
 }
 
 async function handleChatInput(interaction, manager) {
-  if (interaction.commandName === "voicepanel") {
-    await handleVoicePanel(interaction);
+  if (interaction.commandName === "leave") {
+    await handleLeave(interaction, manager);
     return;
   }
 
-  if (!(await ensureMusicChannel(interaction))) {
-    return;
-  }
-
-  if (interaction.commandName === "play") {
-    await handlePlay(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "skip") {
-    await handleSkip(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "pause") {
-    await handlePause(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "resume") {
-    await handleResume(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "stop") {
-    await handleStop(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "queue") {
-    await handleQueue(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "nowplaying") {
-    await handleNowPlaying(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "shuffle") {
-    await handleShuffle(interaction, manager);
-    return;
-  }
-
-  if (interaction.commandName === "loop") {
-    await handleLoop(interaction, manager);
-    return;
-  }
-
-  await interaction.reply({ content: "Неизвестная команда.", ...EPHEMERAL_REPLY });
+  await interaction.reply({
+    content:
+      "Slash-\u043a\u043e\u043c\u0430\u043d\u0434\u044b \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 \u043a\u043d\u043e\u043f\u043a\u0438 \u043c\u0443\u0437\u044b\u043a\u0430\u043b\u044c\u043d\u043e\u0439 \u043f\u0430\u043d\u0435\u043b\u0438.",
+    ...EPHEMERAL_REPLY,
+  });
 }
 
 module.exports = {
