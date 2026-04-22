@@ -287,6 +287,11 @@ class GuildMusicPlayer {
         try {
           console.log(`[Play] Р—Р°РїСѓСЃРє С‚СЂРµРєР°: ${next.title} | ${next.url}`);
 
+          const playbackUrl = String(next?.playbackUrl || next?.url || "").trim();
+          if (!playbackUrl) {
+            throw new Error("Пустой URL источника");
+          }
+
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
@@ -296,7 +301,7 @@ class GuildMusicPlayer {
           let playingStartedAt = null;
           const cookiesPath = resolveYtDlpCookiesPath(next);
           const isYouTubeLike =
-            /(?:youtube\.com|youtu\.be)/i.test(String(next.url || "")) ||
+            /(?:youtube\.com|youtu\.be)/i.test(playbackUrl) ||
             String(next.source || "").toLowerCase().includes("youtube");
 
           const ytDlpArgs = [
@@ -331,7 +336,7 @@ class GuildMusicPlayer {
             console.log(`[yt-dlp] РСЃРїРѕР»СЊР·СѓРµРј cookies: ${cookiesPath}`);
           }
 
-          ytDlpArgs.push(next.url);
+          ytDlpArgs.push(playbackUrl);
 
           const runtimePath = String(YTDLP_RUNTIME_PATH || "").trim();
           const ytDlpEnv = runtimePath

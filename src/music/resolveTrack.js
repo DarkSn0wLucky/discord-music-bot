@@ -1127,6 +1127,38 @@ function buildMetadataQueries(item) {
   return [...new Set(queries.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
+function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
+  const normalized = normalizeMetadataItem(item);
+  if (!normalized?.title) {
+    return null;
+  }
+
+  const artist = String(normalized.artist || "").trim();
+  const title = String(normalized.title || "").trim();
+  const query = String(primaryQuery || buildQueryFromArtistTitle(artist, title) || title).trim();
+  if (!query) {
+    return null;
+  }
+
+  const displayTitle = artist ? `${artist} - ${title}` : title;
+
+  return {
+    title: displayTitle || title || "Без названия",
+    url: `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
+    playbackUrl: `ytsearch1:${query}`,
+    source: "YouTube",
+    author: artist || "YouTube",
+    views: 0,
+    durationSec: 0,
+    durationMs: 0,
+    thumbnail: null,
+    requestedById: requestedBy.id,
+    requestedByTag: requestedBy.tag || requestedBy.username,
+    searchQuery: query,
+    fallbackTracks: [],
+  };
+}
+
 async function resolveTracksFromMetadataItems(items, requestedBy) {
   const sourceItems = limitItems(items, MAX_PLAYLIST_ITEMS);
   if (!sourceItems.length) {
@@ -1160,6 +1192,19 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
 
       const queries = buildMetadataQueries(normalizedItem);
       if (!queries.length) {
+        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy);
+        if (fallbackTrack) {
+          results[index] = fallbackTrack;
+        }
+        continue;
+      }
+
+      const primaryQuery = queries[0];
+      if (fastMode) {
+        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy, primaryQuery);
+        if (fallbackTrack) {
+          results[index] = fallbackTrack;
+        }
         continue;
       }
 
@@ -1169,14 +1214,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
         continue;
       }
 
-      const primaryQuery = queries[0];
       const resolvePromise = (async () => {
-        if (fastMode) {
-          return resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
-            allowYtdlpFallback: false,
-          }).catch(() => null);
-        }
-
         return (
           (await resolveTrackByQueryVariants(queries, requestedBy, {
             allowYtdlpFallback: false,
@@ -1195,6 +1233,11 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
       if (resolvedTrack) {
         queryCache.set(cacheKey, resolvedTrack);
         results[index] = resolvedTrack;
+      } else {
+        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy, primaryQuery);
+        if (fallbackTrack) {
+          results[index] = fallbackTrack;
+        }
       }
     }
   }

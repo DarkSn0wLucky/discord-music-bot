@@ -53,6 +53,8 @@ client.once("clientReady", async () => {
   await manager.ensureIdlePanels().catch((error) => {
     console.warn("[Bot] Idle panel init failed:", error.message);
   });
+
+  manager.startIdlePanelBumpTask();
 });
 
 client.on("interactionCreate", async (interaction) => {

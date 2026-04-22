@@ -1,9 +1,10 @@
-const { ChannelType } = require("discord.js");
+﻿const { ChannelType } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { buildPanelComponents, buildPlayerEmbed } = require("../ui/panel");
 const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
-const DEFAULT_MUSIC_CHANNEL_NAME = "музыка";
+const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
+const IDLE_PANEL_BUMP_MS = 5 * 60_000;
 
 function normalizeChannelName(value) {
   return String(value || "")
@@ -16,6 +17,7 @@ class MusicManager {
   constructor(client) {
     this.client = client;
     this.players = new Map();
+    this.idlePanelBumpTimer = null;
   }
 
   get(guildId) {
@@ -96,19 +98,39 @@ class MusicManager {
     return target || null;
   }
 
-  async ensureIdlePanelForGuild(guild) {
+  async ensureIdlePanelForGuild(guild, options = {}) {
+    const { moveToBottom = false } = options;
     const channel = await this.resolveMusicTextChannel(guild);
     if (!channel?.isTextBased()) {
       return;
     }
 
-    const messages = await channel.messages.fetch({ limit: 30 }).catch(() => null);
-    const existingPanel = messages
-      ? [...messages.values()].find((message) => this.isMusicPanelMessage(message))
-      : null;
+    const player = this.players.get(guild.id);
+    if (player) {
+      const hasActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0 || player.transitionLock;
 
-    if (existingPanel) {
+      if (!hasActivePlayback) {
+        await player.setTextChannel(channel.id);
+        await player.refreshPanel({ moveToBottom });
+        return;
+      }
+    }
+
+    const messages = await channel.messages.fetch({ limit: 40 }).catch(() => null);
+    const panelMessages = messages
+      ? [...messages.values()]
+          .filter((message) => this.isMusicPanelMessage(message))
+          .sort((left, right) => right.createdTimestamp - left.createdTimestamp)
+      : [];
+
+    if (panelMessages.length > 0 && !moveToBottom) {
       return;
+    }
+
+    if (moveToBottom) {
+      for (const message of panelMessages) {
+        await message.delete().catch(() => null);
+      }
     }
 
     const idlePlayer = {
@@ -131,6 +153,29 @@ class MusicManager {
     for (const guild of guilds) {
       await this.ensureIdlePanelForGuild(guild).catch(() => null);
     }
+  }
+
+  async bumpIdlePanelsToBottom() {
+    const guilds = Array.from(this.client.guilds.cache.values());
+    for (const guild of guilds) {
+      await this.ensureIdlePanelForGuild(guild, { moveToBottom: true }).catch(() => null);
+    }
+  }
+
+  startIdlePanelBumpTask(intervalMs = IDLE_PANEL_BUMP_MS) {
+    this.stopIdlePanelBumpTask();
+    this.idlePanelBumpTimer = setInterval(() => {
+      this.bumpIdlePanelsToBottom().catch(() => null);
+    }, Math.max(60_000, Number(intervalMs) || IDLE_PANEL_BUMP_MS));
+  }
+
+  stopIdlePanelBumpTask() {
+    if (!this.idlePanelBumpTimer) {
+      return;
+    }
+
+    clearInterval(this.idlePanelBumpTimer);
+    this.idlePanelBumpTimer = null;
   }
 }
 
