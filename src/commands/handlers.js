@@ -1268,6 +1268,11 @@ async function handleModalSubmit(interaction, manager) {
 }
 
 async function handleChatInput(interaction, manager) {
+  if (interaction.commandName === "voicepanel") {
+    await handleVoicePanel(interaction);
+    return;
+  }
+
   if (interaction.commandName === "leave") {
     await handleLeave(interaction, manager);
     return;
