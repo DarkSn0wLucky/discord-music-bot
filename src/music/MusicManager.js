@@ -1,6 +1,6 @@
 const { ChannelType } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
-const { buildPanelComponents } = require("../ui/panel");
+const { buildPanelComponents, buildPlayerEmbed } = require("../ui/panel");
 const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
 const DEFAULT_MUSIC_CHANNEL_NAME = "музыка";
@@ -65,7 +65,9 @@ class MusicManager {
     }
 
     if (MUSIC_TEXT_CHANNEL_ID) {
-      const byId = guild.channels.cache.get(MUSIC_TEXT_CHANNEL_ID) || (await guild.channels.fetch(MUSIC_TEXT_CHANNEL_ID).catch(() => null));
+      const byId =
+        guild.channels.cache.get(MUSIC_TEXT_CHANNEL_ID) ||
+        (await guild.channels.fetch(MUSIC_TEXT_CHANNEL_ID).catch(() => null));
       if (byId?.isTextBased()) {
         return byId;
       }
@@ -118,7 +120,7 @@ class MusicManager {
 
     await channel
       .send({
-        content: "Нажми кнопку ниже, чтобы включить музыку.",
+        embeds: [buildPlayerEmbed(idlePlayer)],
         components: buildPanelComponents(idlePlayer),
       })
       .catch(() => null);

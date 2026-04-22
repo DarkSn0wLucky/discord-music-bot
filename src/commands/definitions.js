@@ -11,7 +11,7 @@ const definitions = [
         .setRequired(true)
     ),
   new SlashCommandBuilder().setName("skip").setDescription("Пропустить текущий трек"),
-  new SlashCommandBuilder().setName("pause").setDescription("Пауза"),
+  new SlashCommandBuilder().setName("pause").setDescription("Поставить на паузу"),
   new SlashCommandBuilder().setName("resume").setDescription("Продолжить воспроизведение"),
   new SlashCommandBuilder().setName("stop").setDescription("Остановить музыку и очистить очередь"),
   new SlashCommandBuilder().setName("queue").setDescription("Показать очередь"),
@@ -24,12 +24,12 @@ const definitions = [
     .addStringOption((option) =>
       option
         .setName("mode")
-        .setDescription("off / track / queue")
+        .setDescription("Выбери режим цикла")
         .setRequired(true)
         .addChoices(
-          { name: "off", value: "off" },
-          { name: "track", value: "track" },
-          { name: "queue", value: "queue" }
+          { name: "Выкл", value: "off" },
+          { name: "Трек", value: "track" },
+          { name: "Очередь", value: "queue" }
         )
     ),
 ];

@@ -12,6 +12,12 @@ async function deploy() {
       body: commandData,
     });
     console.log(`[Commands] Deployed to guild ${DISCORD_GUILD_ID}`);
+
+    // Explicitly clear global commands to remove leftovers from old versions.
+    await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
+      body: [],
+    });
+    console.log("[Commands] Cleared global commands.");
     return;
   }
 
@@ -25,4 +31,3 @@ deploy().catch((error) => {
   console.error("[Commands] Deploy failed", error);
   process.exitCode = 1;
 });
-

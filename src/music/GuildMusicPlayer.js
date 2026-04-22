@@ -804,17 +804,10 @@ class GuildMusicPlayer {
       const channel = await this.getTextChannel();
       if (!channel) return;
 
-      const idle = !this.currentTrack && this.queue.length === 0;
-      const payload = idle
-        ? {
-            content: "Нажми кнопку ниже, чтобы включить музыку.",
-            embeds: [],
-            components: buildPanelComponents(this),
-          }
-        : {
-            embeds: [buildPlayerEmbed(this)],
-            components: buildPanelComponents(this),
-          };
+      const payload = {
+        embeds: [buildPlayerEmbed(this)],
+        components: buildPanelComponents(this),
+      };
 
       if (this.panelMessageId && !moveToBottom) {
         try {

@@ -1,4 +1,4 @@
-﻿const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require("discord.js");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require("discord.js");
 const { EMBED_COLOR_HEX } = require("../config");
 const { formatDuration, loopLabel, progressBar, safeLinkText, truncate } = require("../utils/format");
 
@@ -15,14 +15,14 @@ function buildPlayerEmbed(player) {
   if (!player.currentTrack) {
     return new EmbedBuilder()
       .setColor(EMBED_COLOR_HEX)
-      .setTitle("РњСѓР·С‹РєР°Р»СЊРЅС‹Р№ РїР»РµРµСЂ")
-      .setDescription("РћС‡РµСЂРµРґСЊ РїСѓСЃС‚Р°. Р”РѕР±Р°РІСЊ С‚СЂРµРє С‡РµСЂРµР· `/play <СЃСЃС‹Р»РєР° РёР»Рё Р·Р°РїСЂРѕСЃ>` РёР»Рё РєРЅРѕРїРєСѓ РЅРёР¶Рµ.")
+      .setTitle("Музыкальный плеер")
+      .setDescription("Очередь пуста. Включи музыку кнопкой ниже.")
       .addFields(
-        { name: "РЎС‚Р°С‚СѓСЃ", value: "РћР¶РёРґР°РЅРёРµ", inline: true },
-        { name: "Р¦РёРєР»", value: loopLabel(player.loopMode), inline: true },
-        { name: "Р’ РѕС‡РµСЂРµРґРё", value: String(player.queue.length), inline: true }
+        { name: "Статус", value: "Ожидание", inline: true },
+        { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
+        { name: "В очереди", value: String(player.queue.length), inline: true }
       )
-      .setFooter({ text: "Music mode" });
+      .setFooter({ text: "Режим музыки" });
   }
 
   const track = player.currentTrack;
@@ -37,18 +37,18 @@ function buildPlayerEmbed(player) {
     player.queue
       .slice(0, 3)
       .map((item, index) => `${index + 1}. [${truncate(safeLinkText(item.title), 38)}](${item.url})`)
-      .join("\n") || "РџСѓСЃС‚Рѕ";
+      .join("\n") || "Пусто";
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
-    .setTitle("РЎРµР№С‡Р°СЃ РёРіСЂР°РµС‚")
+    .setTitle("Сейчас играет")
     .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
     .addFields(
-      { name: "РСЃС‚РѕС‡РЅРёРє", value: track.source, inline: true },
-      { name: "Р¦РёРєР»", value: loopLabel(player.loopMode), inline: true },
-      { name: "Р”Р»РёРЅР° РѕС‡РµСЂРµРґРё", value: String(player.queue.length), inline: true },
-      { name: "TIME", value: `${progressBar(elapsedMs, durationMs, 28)}\n${durationText}` },
-      { name: "Р”Р°Р»СЊС€Рµ РІ РѕС‡РµСЂРµРґРё", value: queuePreview }
+      { name: "Источник", value: track.source, inline: true },
+      { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
+      { name: "Длина очереди", value: String(player.queue.length), inline: true },
+      { name: "TIME", value: `${progressBar(elapsedMs, durationMs, 34)}\n${durationText}` },
+      { name: "Дальше в очереди", value: queuePreview }
     );
 
   if (track.thumbnail) {
@@ -60,8 +60,8 @@ function buildPlayerEmbed(player) {
 
 function buildControlsRow(player) {
   const idle = !player.currentTrack && player.queue.length === 0;
-  const pauseLabel = player.isPaused() ? "РџСЂРѕРґРѕР»Р¶РёС‚СЊ" : "РџР°СѓР·Р°";
-  const loopButtonLabel = `Р¦РёРєР»: ${loopLabel(player.loopMode)}`;
+  const pauseLabel = player.isPaused() ? "Продолжить" : "Пауза";
+  const loopButtonLabel = `Цикл: ${loopLabel(player.loopMode)}`;
 
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -71,17 +71,17 @@ function buildControlsRow(player) {
       .setDisabled(idle),
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.skip)
-      .setLabel("РЎРєРёРї")
+      .setLabel("Скип")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(idle),
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.stop)
-      .setLabel("РЎС‚РѕРї")
+      .setLabel("Стоп")
       .setStyle(ButtonStyle.Danger)
       .setDisabled(idle),
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.shuffle)
-      .setLabel("РЁР°С„Р»")
+      .setLabel("Шафл")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(player.queue.length < 2),
     new ButtonBuilder()
@@ -96,7 +96,7 @@ function buildQuickPlayRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.quickPlay)
-      .setLabel("ВКЛЮЧИТЬ МУЗЫКУ")
+      .setLabel("🔥 ВКЛЮЧИТЬ МУЗЫКУ СЕЙЧАС 🔥")
       .setStyle(ButtonStyle.Danger)
   );
 }
@@ -112,23 +112,23 @@ function buildPanelComponents(player) {
 function buildQueueEmbed(player) {
   const current = player.currentTrack
     ? `[${truncate(safeLinkText(player.currentTrack.title), 64)}](${player.currentTrack.url})`
-    : "РќРёС‡РµРіРѕ РЅРµ РёРіСЂР°РµС‚";
+    : "Ничего не играет";
 
   const queueText =
     player.queue
       .slice(0, 15)
       .map(
         (track, index) =>
-          `${index + 1}. [${truncate(safeLinkText(track.title), 56)}](${track.url}) В· ${formatDuration(track.durationSec)}`
+          `${index + 1}. [${truncate(safeLinkText(track.title), 56)}](${track.url}) · ${formatDuration(track.durationSec)}`
       )
-      .join("\n") || "РџСѓСЃС‚Рѕ";
+      .join("\n") || "Пусто";
 
   return new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
-    .setTitle("РћС‡РµСЂРµРґСЊ")
-    .setDescription(`**РЎРµР№С‡Р°СЃ:** ${current}`)
-    .addFields({ name: `РўСЂРµРєРѕРІ РІ РѕС‡РµСЂРµРґРё: ${player.queue.length}`, value: queueText })
-    .setFooter({ text: `Р¦РёРєР»: ${loopLabel(player.loopMode)}` });
+    .setTitle("Очередь")
+    .setDescription(`**Сейчас:** ${current}`)
+    .addFields({ name: `Треков в очереди: ${player.queue.length}`, value: queueText })
+    .setFooter({ text: `Цикл: ${loopLabel(player.loopMode)}` });
 }
 
 function buildActionEmbed(title, description) {
@@ -149,4 +149,3 @@ module.exports = {
   buildQueueEmbed,
   buildActionEmbed,
 };
-
