@@ -359,7 +359,7 @@ function parseYandexUrlInfo(url) {
       };
     }
 
-    const directPlaylist = pathName.match(/\/playlists\/([a-z0-9-]{8,})/i);
+    const directPlaylist = pathName.match(/\/playlists\/([^/?#]+)/i);
     if (directPlaylist) {
       return {
         origin: parsed.origin,
@@ -1282,7 +1282,7 @@ function parseYandexPlaylistTargetFromHtml(html) {
     return null;
   }
 
-  const directMatch = source.match(/"uid":(\d+),"kind":(\d+),"title":"/i);
+  const directMatch = source.match(/"uid"\s*:\s*(\d+)\s*,\s*"kind"\s*:\s*(\d+)\s*,\s*"title"\s*:/i);
   if (directMatch) {
     return {
       owner: directMatch[1],
@@ -1290,11 +1290,21 @@ function parseYandexPlaylistTargetFromHtml(html) {
     };
   }
 
-  const reverseMatch = source.match(/"kind":(\d+),"title":"[^"]+","coverUri":[\s\S]{0,800}?"uid":(\d+)/i);
+  const reverseMatch = source.match(/"kind"\s*:\s*(\d+)\s*,[\s\S]{0,1200}?"uid"\s*:\s*(\d+)/i);
   if (reverseMatch) {
     return {
       owner: reverseMatch[2],
       kind: reverseMatch[1],
+    };
+  }
+
+  const metaMatch = source.match(
+    /"meta"\s*:\s*\{[\s\S]{0,1200}?"uid"\s*:\s*(\d+)\s*,\s*"kind"\s*:\s*(\d+)[\s\S]{0,1200}?\}/i
+  );
+  if (metaMatch) {
+    return {
+      owner: metaMatch[1],
+      kind: metaMatch[2],
     };
   }
 
