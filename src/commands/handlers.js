@@ -20,7 +20,8 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
-const PLAY_REQUEST_TIMEOUT_MS = 30_000;
+const PLAY_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PLAY_REQUEST_TIMEOUT_MS || "0", 10);
+const HAS_PLAY_REQUEST_TIMEOUT = Number.isFinite(PLAY_REQUEST_TIMEOUT_MS) && PLAY_REQUEST_TIMEOUT_MS > 0;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
 const QUICK_PLAY_MODAL_ID = "music:quickplay:modal";
 const QUICK_PLAY_QUERY_INPUT_ID = "music:quickplay:query";
@@ -112,6 +113,10 @@ function buildPlayTimeoutError() {
 }
 
 function withPromiseTimeout(promise, timeoutMs, timeoutErrorFactory) {
+  if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) {
+    return Promise.resolve(promise);
+  }
+
   return new Promise((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -862,21 +867,25 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
   await interaction.deferReply();
   let interactionTimedOut = false;
-  let thinkingTimer = setTimeout(async () => {
-    interactionTimedOut = true;
-    thinkingTimer = null;
-    await interaction
-      .editReply({
-        embeds: [
-          buildActionEmbed(
-            "\u0422\u0430\u0439\u043c\u0430\u0443\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u0430",
-            "\u041d\u0435 \u0443\u0441\u043f\u0435\u043b \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0437\u0430 30 \u0441\u0435\u043a\u0443\u043d\u0434. \u041e\u0442\u043f\u0440\u0430\u0432\u044c `/play` \u0435\u0449\u0435 \u0440\u0430\u0437."
-          ),
-        ],
-        components: [],
-      })
-      .catch(() => null);
-  }, PLAY_REQUEST_TIMEOUT_MS);
+  let thinkingTimer = null;
+  if (HAS_PLAY_REQUEST_TIMEOUT) {
+    const timeoutSec = Math.max(1, Math.round(PLAY_REQUEST_TIMEOUT_MS / 1000));
+    thinkingTimer = setTimeout(async () => {
+      interactionTimedOut = true;
+      thinkingTimer = null;
+      await interaction
+        .editReply({
+          embeds: [
+            buildActionEmbed(
+              "\u0422\u0430\u0439\u043c\u0430\u0443\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u0430",
+              `\u041d\u0435 \u0443\u0441\u043f\u0435\u043b \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0437\u0430 ${timeoutSec} \u0441\u0435\u043a\u0443\u043d\u0434. \u041e\u0442\u043f\u0440\u0430\u0432\u044c \`/play\` \u0435\u0449\u0435 \u0440\u0430\u0437.`
+            ),
+          ],
+          components: [],
+        })
+        .catch(() => null);
+    }, PLAY_REQUEST_TIMEOUT_MS);
+  }
 
   const clearThinkingTimer = () => {
     if (!thinkingTimer) {
@@ -893,7 +902,9 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
   };
 
   const runWithPlayTimeout = (promise) =>
-    withPromiseTimeout(promise, PLAY_REQUEST_TIMEOUT_MS, buildPlayTimeoutError);
+    HAS_PLAY_REQUEST_TIMEOUT
+      ? withPromiseTimeout(promise, PLAY_REQUEST_TIMEOUT_MS, buildPlayTimeoutError)
+      : Promise.resolve(promise);
 
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
