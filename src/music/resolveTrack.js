@@ -784,6 +784,107 @@ function tokenMatches(queryToken, titleToken) {
   );
 }
 
+function toMeaningfulTokens(value) {
+  return [...new Set(
+    normalizeText(value)
+      .split(" ")
+      .filter((token) => token.length > 1 && !QUERY_STOPWORDS.has(token))
+  )];
+}
+
+function tokenCoverageRatio(sourceTokens, targetTokens) {
+  const normalizedSource = Array.isArray(sourceTokens) ? sourceTokens.filter(Boolean) : [];
+  const normalizedTarget = Array.isArray(targetTokens) ? targetTokens.filter(Boolean) : [];
+
+  if (normalizedSource.length === 0) {
+    return 1;
+  }
+  if (normalizedTarget.length === 0) {
+    return 0;
+  }
+
+  let matchedCount = 0;
+  for (const sourceToken of normalizedSource) {
+    const matched = normalizedTarget.some((targetToken) => tokenMatches(sourceToken, targetToken));
+    if (matched) {
+      matchedCount += 1;
+    }
+  }
+
+  return matchedCount / normalizedSource.length;
+}
+
+function metadataDurationMs(item) {
+  const durationMsRaw = Number(item?.durationMs);
+  if (Number.isFinite(durationMsRaw) && durationMsRaw > 0) {
+    return Math.round(durationMsRaw);
+  }
+
+  const durationSecRaw = Number(item?.durationSec);
+  if (Number.isFinite(durationSecRaw) && durationSecRaw > 0) {
+    return Math.round(durationSecRaw * 1000);
+  }
+
+  return 0;
+}
+
+function isDurationComparable(metadataItem, candidateTrack) {
+  const metadataMs = metadataDurationMs(metadataItem);
+  const candidateMs = metadataDurationMs(candidateTrack);
+
+  if (metadataMs <= 0 || candidateMs <= 0) {
+    return true;
+  }
+
+  const diffSec = Math.abs(metadataMs - candidateMs) / 1000;
+  const metadataSec = metadataMs / 1000;
+  const toleranceSec = Math.min(35, Math.max(10, Math.round(metadataSec * 0.08)));
+  return diffSec <= toleranceSec;
+}
+
+function isStrictMetadataMatch(candidate, metadataItem, primaryQuery = "") {
+  if (!candidate) {
+    return false;
+  }
+
+  const normalizedItem = normalizeMetadataItem(metadataItem);
+  if (!normalizedItem?.title) {
+    return false;
+  }
+
+  const combinedCandidateText = `${candidate.author || ""} ${candidate.title || ""}`;
+  if (primaryQuery && !hasQueryTokenCoverage(combinedCandidateText, primaryQuery)) {
+    return false;
+  }
+
+  const candidateTitleTokens = toMeaningfulTokens(candidate.title);
+  const candidateAuthorTokens = toMeaningfulTokens(candidate.author);
+  const candidateAllTokens = [...new Set([...candidateAuthorTokens, ...candidateTitleTokens])];
+
+  const titleTokens = toMeaningfulTokens(normalizedItem.title);
+  if (titleTokens.length > 0) {
+    const titleCoverage = tokenCoverageRatio(
+      titleTokens,
+      candidateTitleTokens.length > 0 ? candidateTitleTokens : candidateAllTokens
+    );
+    const titleThreshold = titleTokens.length <= 2 ? 1 : 0.8;
+    if (titleCoverage < titleThreshold) {
+      return false;
+    }
+  }
+
+  const artistTokens = toMeaningfulTokens(normalizedItem.artist);
+  if (artistTokens.length > 0) {
+    const artistCoverage = tokenCoverageRatio(artistTokens, candidateAllTokens);
+    const artistThreshold = artistTokens.length === 1 ? 1 : 0.75;
+    if (artistCoverage < artistThreshold) {
+      return false;
+    }
+  }
+
+  return isDurationComparable(metadataItem, candidate);
+}
+
 function strictCoverageThreshold(tokenCount) {
   if (tokenCount <= 1) {
     return 1;
@@ -1222,7 +1323,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
 
       const primaryQuery = queries[0];
       const acceptCandidate = (candidate) =>
-        !strictMatch || hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, primaryQuery);
+        !strictMatch || isStrictMetadataMatch(candidate, normalizedItem, primaryQuery);
       const cacheKey = queries.join("||");
       if (queryCache.has(cacheKey)) {
         results[index] = queryCache.get(cacheKey);
@@ -1545,9 +1646,12 @@ async function resolveYandexUrl(url, requestedBy) {
 
     const metadata = rawTracks.map((item) => {
       const track = item?.track || item || {};
+      const durationMs = Number(track?.durationMs) || 0;
       return {
         title: track?.title || "",
         artist: joinArtists(track?.artists),
+        durationMs: durationMs > 0 ? durationMs : 0,
+        durationSec: durationMs > 0 ? Math.round(durationMs / 1000) : 0,
       };
     });
 
@@ -1641,6 +1745,8 @@ async function resolveYandexUrl(url, requestedBy) {
         metadata.push({
           title: track?.title || "",
           artist: joinArtists(track?.artists),
+          durationMs: Number(track?.durationMs) || 0,
+          durationSec: Number(track?.durationMs) > 0 ? Math.round(Number(track?.durationMs) / 1000) : 0,
         });
       }
     }
@@ -1704,6 +1810,8 @@ async function resolveSpotifyUrl(url, requestedBy) {
   const metadata = spotifyTracks.map((item) => ({
     title: item?.name || "",
     artist: joinArtists(item?.artists),
+    durationMs: Number(item?.durationInMs) || 0,
+    durationSec: Number(item?.durationInSec) || (Number(item?.durationInMs) > 0 ? Math.round(Number(item?.durationInMs) / 1000) : 0),
   }));
 
   const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
@@ -1747,6 +1855,8 @@ async function resolveDeezerUrl(url, requestedBy) {
   const metadata = deezerTracks.map((item) => ({
     title: item?.title || "",
     artist: item?.artist?.name || "",
+    durationMs: Number(item?.durationInMs) || 0,
+    durationSec: Number(item?.durationInSec) || Number(item?.duration) || (Number(item?.durationInMs) > 0 ? Math.round(Number(item?.durationInMs) / 1000) : 0),
   }));
 
   const tracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
@@ -1799,7 +1909,7 @@ function toVkTrack(entry, requestedBy, fallbackUrl) {
 }
 
 function metadataFromExtractorEntry(entry, sourceLabel = "") {
-  return normalizeMetadataItem(
+  const normalized = normalizeMetadataItem(
     {
       artist:
         entry?.artist ||
@@ -1812,6 +1922,19 @@ function metadataFromExtractorEntry(entry, sourceLabel = "") {
     },
     sourceLabel
   );
+
+  if (!normalized?.title) {
+    return null;
+  }
+
+  const durationSecRaw = Number(entry?.duration);
+  const durationSec = Number.isFinite(durationSecRaw) && durationSecRaw > 0 ? Math.round(durationSecRaw) : 0;
+
+  return {
+    ...normalized,
+    durationSec,
+    durationMs: durationSec > 0 ? durationSec * 1000 : 0,
+  };
 }
 
 async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {

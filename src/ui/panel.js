@@ -26,8 +26,15 @@ function buildPlayerEmbed(player) {
   }
 
   const track = player.currentTrack;
-  const elapsedMs = track.startedAt ? Date.now() - track.startedAt : 0;
-  const durationMs = track.durationMs || 0;
+  const playbackDurationMs = Number(player.player?.state?.resource?.playbackDuration) || 0;
+  const elapsedMs = track.startedAt ? Math.max(0, Date.now() - track.startedAt) : Math.max(0, playbackDurationMs);
+  const durationMsRaw =
+    Number(track.durationMs) > 0
+      ? Number(track.durationMs)
+      : Number(track.durationSec) > 0
+        ? Number(track.durationSec) * 1000
+        : 0;
+  const durationMs = Math.max(0, durationMsRaw);
   const durationText =
     durationMs > 0
       ? `${formatDuration(elapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`

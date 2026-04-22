@@ -1,11 +1,13 @@
 function formatDuration(totalSeconds) {
-  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
-    return "LIVE";
+  if (!Number.isFinite(totalSeconds)) {
+    return "--:--";
   }
 
-  const seconds = Math.floor(totalSeconds % 60);
-  const minutes = Math.floor((totalSeconds / 60) % 60);
-  const hours = Math.floor(totalSeconds / 3600);
+  const safeTotalSeconds = Math.max(0, Math.floor(totalSeconds));
+
+  const seconds = safeTotalSeconds % 60;
+  const minutes = Math.floor((safeTotalSeconds / 60) % 60);
+  const hours = Math.floor(safeTotalSeconds / 3600);
 
   if (hours > 0) {
     return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
