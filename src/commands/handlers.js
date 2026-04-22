@@ -23,6 +23,10 @@ const playRequestQueueByGuild = new Map();
 const PLAY_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PLAY_REQUEST_TIMEOUT_MS || "0", 10);
 const HAS_PLAY_REQUEST_TIMEOUT = Number.isFinite(PLAY_REQUEST_TIMEOUT_MS) && PLAY_REQUEST_TIMEOUT_MS > 0;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
+const URL_RESOLVE_TIMEOUT_MS = Number.parseInt(process.env.URL_RESOLVE_TIMEOUT_MS || "300000", 10);
+const HAS_URL_RESOLVE_TIMEOUT = Number.isFinite(URL_RESOLVE_TIMEOUT_MS) && URL_RESOLVE_TIMEOUT_MS > 0;
+const URL_RESOLVE_TIMEOUT_ERROR_CODE = "URL_RESOLVE_TIMEOUT";
+const URL_RESOLVE_HEARTBEAT_INTERVAL_MS = 5_000;
 const QUICK_PLAY_MODAL_ID = "music:quickplay:modal";
 const QUICK_PLAY_QUERY_INPUT_ID = "music:quickplay:query";
 const VOICE_PANEL_PREFIX = "voicepanel";
@@ -109,6 +113,12 @@ function buildLinkPickerCandidates(primaryTrack, extraCandidates = []) {
 function buildPlayTimeoutError() {
   const error = new Error(PLAY_TIMEOUT_ERROR_CODE);
   error.code = PLAY_TIMEOUT_ERROR_CODE;
+  return error;
+}
+
+function buildUrlResolveTimeoutError() {
+  const error = new Error(URL_RESOLVE_TIMEOUT_ERROR_CODE);
+  error.code = URL_RESOLVE_TIMEOUT_ERROR_CODE;
   return error;
 }
 
@@ -204,6 +214,34 @@ async function showQuickPlayModal(interaction) {
 
   modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
   await interaction.showModal(modal);
+}
+
+function startUrlResolveHeartbeat(progress) {
+  let stopped = false;
+  let percent = 30;
+  let tick = 0;
+  const texts = [
+    "Получаю данные по ссылке",
+    "Анализирую источник",
+    "Сопоставляю треки с YouTube",
+    "Формирую список для очереди",
+  ];
+
+  const timer = setInterval(() => {
+    if (stopped) {
+      return;
+    }
+
+    percent = Math.min(66, percent + 2);
+    const text = texts[tick % texts.length];
+    tick += 1;
+    progress.update(percent, text).catch(() => null);
+  }, URL_RESOLVE_HEARTBEAT_INTERVAL_MS);
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 async function pickTrackFromMenu(interaction, query, tracks) {
@@ -918,8 +956,18 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
       if (isDirectUrl) {
         await progress.update(30, "Получаю данные по ссылке");
-        const resolved = await runWithPlayTimeout(resolveTracks(query, interaction.user));
+        const stopUrlResolveHeartbeat = startUrlResolveHeartbeat(progress);
+        let resolved;
+        try {
+          const resolvePromise = HAS_URL_RESOLVE_TIMEOUT
+            ? withPromiseTimeout(resolveTracks(query, interaction.user), URL_RESOLVE_TIMEOUT_MS, buildUrlResolveTimeoutError)
+            : resolveTracks(query, interaction.user);
+          resolved = await runWithPlayTimeout(resolvePromise);
+        } finally {
+          stopUrlResolveHeartbeat();
+        }
         ensurePlayActive();
+        await progress.update(62, "Ссылку обработал");
         tracksToAdd = resolved.tracks;
 
         if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
@@ -1031,6 +1079,23 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       await player.refreshPanel({ moveToBottom: true });
     } catch (error) {
       if (error?.code === PLAY_TIMEOUT_ERROR_CODE) {
+        return;
+      }
+      if (error?.code === URL_RESOLVE_TIMEOUT_ERROR_CODE) {
+        clearThinkingTimer();
+        progress.stop();
+        const timeoutSec = Math.max(1, Math.round(URL_RESOLVE_TIMEOUT_MS / 1000));
+        await interaction
+          .editReply({
+            embeds: [
+              buildActionEmbed(
+                "Таймаут разбора ссылки",
+                `Не успел обработать ссылку за ${timeoutSec} сек. Попробуй ещё раз или отправь другую ссылку.`
+              ),
+            ],
+            components: [],
+          })
+          .catch(() => null);
         return;
       }
 
