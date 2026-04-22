@@ -31,7 +31,7 @@ function buildPlayerEmbed(player) {
   const durationText =
     durationMs > 0
       ? `${formatDuration(elapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`
-      : "LIVE";
+      : `${formatDuration(elapsedMs / 1000)} / --:--`;
 
   const queuePreview =
     player.queue

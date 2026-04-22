@@ -28,7 +28,8 @@ function safeLinkText(text) {
 
 function progressBar(elapsedMs, totalMs, size = 14) {
   if (!Number.isFinite(totalMs) || totalMs <= 0) {
-    return "[LIVE]";
+    const safeSize = Math.max(2, Number(size) || 14);
+    return `o${"-".repeat(safeSize - 1)}`;
   }
 
   const ratio = Math.max(0, Math.min(1, elapsedMs / totalMs));

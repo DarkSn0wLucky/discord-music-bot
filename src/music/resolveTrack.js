@@ -25,7 +25,9 @@ const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
 const METADATA_RESOLVE_CONCURRENCY = 3;
+const METADATA_RESOLVE_CONCURRENCY_FAST = 8;
 const METADATA_ITEM_RESOLVE_TIMEOUT_MS = 12_000;
+const METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS = 4_000;
 const PLAYLIST_RESOLVE_BUDGET_MS = 45_000;
 const PLAYLIST_FAST_MODE_THRESHOLD = 40;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -1020,12 +1022,18 @@ async function resolveTrackByMetadataQuery(query, requestedBy, options = {}) {
   }
 
   const allowYtdlpFallback = options.allowYtdlpFallback !== false;
+  const accept = typeof options.accept === "function" ? options.accept : () => true;
   const candidates = await resolveSearchCandidates(normalizedQuery, requestedBy, {
     limit: SEARCH_TRACK_PACK_SIZE,
     allowYtdlpFallback,
   }).catch(() => []);
 
-  return packSearchTracks(candidates, normalizedQuery);
+  const packed = packSearchTracks(candidates, normalizedQuery);
+  if (!packed) {
+    return null;
+  }
+
+  return accept(packed, normalizedQuery) ? packed : null;
 }
 
 async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
@@ -1139,6 +1147,14 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
   if (!query) {
     return null;
   }
+  const durationMsRaw = Number(item?.durationMs);
+  const durationSecRaw = Number(item?.durationSec);
+  const durationMs = Number.isFinite(durationMsRaw) && durationMsRaw > 0
+    ? Math.round(durationMsRaw)
+    : Number.isFinite(durationSecRaw) && durationSecRaw > 0
+      ? Math.round(durationSecRaw * 1000)
+      : 0;
+  const durationSec = durationMs > 0 ? Math.round(durationMs / 1000) : 0;
 
   const displayTitle = artist ? `${artist} - ${title}` : title;
 
@@ -1149,8 +1165,8 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
     source: "YouTube",
     author: artist || "YouTube",
     views: 0,
-    durationSec: 0,
-    durationMs: 0,
+    durationSec,
+    durationMs,
     thumbnail: null,
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
@@ -1159,18 +1175,23 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
   };
 }
 
-async function resolveTracksFromMetadataItems(items, requestedBy) {
+async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) {
   const sourceItems = limitItems(items, MAX_PLAYLIST_ITEMS);
   if (!sourceItems.length) {
     return [];
   }
 
+  const allowSyntheticFallback = options.allowSyntheticFallback === true;
+  const strictMatch = options.strictMatch !== false;
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const results = new Array(sourceItems.length).fill(null);
   const queryCache = new Map();
   let cursor = 0;
-  const workerCount = Math.max(1, Math.min(METADATA_RESOLVE_CONCURRENCY, sourceItems.length));
+  const workerCount = Math.max(
+    1,
+    Math.min(fastMode ? METADATA_RESOLVE_CONCURRENCY_FAST : METADATA_RESOLVE_CONCURRENCY, sourceItems.length)
+  );
 
   async function worker() {
     while (true) {
@@ -1192,7 +1213,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
 
       const queries = buildMetadataQueries(normalizedItem);
       if (!queries.length) {
-        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy);
+        const fallbackTrack = allowSyntheticFallback ? buildMetadataFallbackTrack(item, requestedBy) : null;
         if (fallbackTrack) {
           results[index] = fallbackTrack;
         }
@@ -1200,14 +1221,8 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
       }
 
       const primaryQuery = queries[0];
-      if (fastMode) {
-        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy, primaryQuery);
-        if (fallbackTrack) {
-          results[index] = fallbackTrack;
-        }
-        continue;
-      }
-
+      const acceptCandidate = (candidate) =>
+        !strictMatch || hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, primaryQuery);
       const cacheKey = queries.join("||");
       if (queryCache.has(cacheKey)) {
         results[index] = queryCache.get(cacheKey);
@@ -1218,23 +1233,32 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
         return (
           (await resolveTrackByQueryVariants(queries, requestedBy, {
             allowYtdlpFallback: false,
+            accept: acceptCandidate,
           }).catch(() => null)) ||
           (await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
             allowYtdlpFallback: false,
+            accept: acceptCandidate,
           }).catch(() => null))
         );
       })();
 
       const resolvedTrack = await Promise.race([
         resolvePromise,
-        new Promise((resolve) => setTimeout(() => resolve(null), METADATA_ITEM_RESOLVE_TIMEOUT_MS)),
+        new Promise((resolve) =>
+          setTimeout(
+            () => resolve(null),
+            fastMode ? METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS : METADATA_ITEM_RESOLVE_TIMEOUT_MS
+          )
+        ),
       ]);
 
       if (resolvedTrack) {
         queryCache.set(cacheKey, resolvedTrack);
         results[index] = resolvedTrack;
       } else {
-        const fallbackTrack = buildMetadataFallbackTrack(normalizedItem, requestedBy, primaryQuery);
+        const fallbackTrack = allowSyntheticFallback
+          ? buildMetadataFallbackTrack(item, requestedBy, primaryQuery)
+          : null;
         if (fallbackTrack) {
           results[index] = fallbackTrack;
         }
