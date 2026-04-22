@@ -19,7 +19,7 @@ const {
 } = require("../config");
 
 const SEARCH_RESULTS_LIMIT = 8;
-const SEARCH_TRACK_PACK_SIZE = 4;
+const SEARCH_TRACK_PACK_SIZE = 5;
 const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
@@ -1000,6 +1000,82 @@ async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
   return null;
 }
 
+function normalizeMetadataPiece(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function splitArtistTitle(rawTitle) {
+  const value = normalizeMetadataPiece(rawTitle);
+  if (!value) {
+    return { artist: "", title: "" };
+  }
+
+  const separators = [" - ", " – ", " — ", " —", " –", "- "];
+  for (const separator of separators) {
+    const index = value.indexOf(separator);
+    if (index > 0 && index < value.length - separator.length) {
+      const artist = normalizeMetadataPiece(value.slice(0, index));
+      const title = normalizeMetadataPiece(value.slice(index + separator.length));
+      if (artist && title) {
+        return { artist, title };
+      }
+    }
+  }
+
+  return { artist: "", title: value };
+}
+
+function normalizeMetadataItem(rawItem, defaultArtist = "") {
+  const fallbackArtist = normalizeMetadataPiece(defaultArtist);
+  const source = rawItem || {};
+
+  const directArtist = normalizeMetadataPiece(
+    source.artist ||
+      source.uploader ||
+      source.channel ||
+      source.author ||
+      source.creator ||
+      source.album_artist ||
+      fallbackArtist
+  );
+
+  const directTitle = normalizeMetadataPiece(
+    source.title || source.track || source.name || source.fulltitle || source.alt_title
+  );
+
+  const split = splitArtistTitle(directTitle);
+  const artist = directArtist || split.artist || fallbackArtist;
+  const title = split.title || directTitle;
+
+  if (!title) {
+    return null;
+  }
+
+  return { artist, title };
+}
+
+function buildMetadataQueries(item) {
+  const normalized = normalizeMetadataItem(item);
+  if (!normalized?.title) {
+    return [];
+  }
+
+  const title = normalized.title;
+  const artist = normalized.artist;
+  const queries = [];
+
+  if (artist) {
+    queries.push(buildQueryFromArtistTitle(artist, title));
+    queries.push(buildQueryFromArtistTitle(artist, `${title} official audio`));
+    queries.push(buildQueryFromArtistTitle(artist, `${title} audio`));
+  }
+
+  queries.push(title);
+  queries.push(`${title} official audio`);
+
+  return [...new Set(queries.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
 async function resolveTracksFromMetadataItems(items, requestedBy) {
   const sourceItems = Array.isArray(items) ? items.slice(0, MAX_PLAYLIST_ITEMS) : [];
   if (!sourceItems.length) {
@@ -1007,6 +1083,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
   }
 
   const results = new Array(sourceItems.length).fill(null);
+  const queryCache = new Map();
   let cursor = 0;
   const workerCount = Math.max(1, Math.min(METADATA_RESOLVE_CONCURRENCY, sourceItems.length));
 
@@ -1019,15 +1096,31 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
       }
 
       const item = sourceItems[index];
-      const title = String(item?.title || "").trim();
-      if (!title) {
+      const normalizedItem = normalizeMetadataItem(item);
+      if (!normalizedItem?.title) {
         continue;
       }
 
-      const artist = String(item?.artist || "").trim();
-      const query = buildQueryFromArtistTitle(artist, title);
-      const resolvedTrack = await resolveTrackByMetadataQuery(query, requestedBy).catch(() => null);
+      const queries = buildMetadataQueries(normalizedItem);
+      if (!queries.length) {
+        continue;
+      }
+
+      const cacheKey = queries.join("||");
+      if (queryCache.has(cacheKey)) {
+        results[index] = queryCache.get(cacheKey);
+        continue;
+      }
+
+      const primaryQuery = queries[0];
+      const resolvedTrack =
+        (await resolveTrackByQueryVariants(queries, requestedBy, {
+          accept: (candidate, usedQuery) =>
+            hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, usedQuery || primaryQuery),
+        }).catch(() => null)) || (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
+
       if (resolvedTrack) {
+        queryCache.set(cacheKey, resolvedTrack);
         results[index] = resolvedTrack;
       }
     }
@@ -1357,8 +1450,6 @@ async function resolveYandexUrl(url, requestedBy) {
           };
         }
       }
-
-      return null;
     }
 
     const metadata = [];
@@ -1380,6 +1471,19 @@ async function resolveYandexUrl(url, requestedBy) {
         title: albumData?.title || "Yandex album",
       };
     }
+  }
+
+  const ytdlpFallback = await resolveViaYtDlpMetadata(url, requestedBy, {
+    sourceLabel: "Yandex Music",
+    cookiesPath: YTDLP_COOKIES_PATH,
+    timeoutMs: 30_000,
+    playlistKind: "yandex_playlist",
+    trackKind: "yandex_track",
+    playlistTitleFallback: "Yandex playlist",
+    trackTitleFallback: "Yandex track",
+  });
+  if (ytdlpFallback) {
+    return ytdlpFallback;
   }
 
   return null;
@@ -1509,6 +1613,89 @@ function toVkTrack(entry, requestedBy, fallbackUrl) {
     thumbnail: entry?.thumbnail || null,
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
+  };
+}
+
+function metadataFromExtractorEntry(entry, sourceLabel = "") {
+  return normalizeMetadataItem(
+    {
+      artist:
+        entry?.artist ||
+        entry?.uploader ||
+        entry?.channel ||
+        entry?.creator ||
+        entry?.author ||
+        sourceLabel,
+      title: entry?.track || entry?.title || entry?.fulltitle || entry?.alt_title || "",
+    },
+    sourceLabel
+  );
+}
+
+async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
+  const sourceLabel = String(options.sourceLabel || "").trim();
+  const cookiesPath = options.cookiesPath || "";
+  const timeoutMs = Number(options.timeoutMs) || 30_000;
+  const playlistKind = String(options.playlistKind || "external_playlist");
+  const trackKind = String(options.trackKind || "external_track");
+  const playlistTitleFallback = String(options.playlistTitleFallback || `${sourceLabel || "External"} playlist`);
+  const trackTitleFallback = String(options.trackTitleFallback || `${sourceLabel || "External"} track`);
+
+  const extractorJson = await fetchYtDlpJson(url, {
+    timeoutMs,
+    cookiesPath,
+    flatPlaylist: true,
+    playlistEnd: MAX_PLAYLIST_ITEMS,
+  }).catch(() => null);
+
+  if (!extractorJson) {
+    return null;
+  }
+
+  const entries = Array.isArray(extractorJson.entries) ? extractorJson.entries.filter(Boolean) : [];
+  if (entries.length > 0) {
+    const metadata = entries
+      .slice(0, MAX_PLAYLIST_ITEMS)
+      .map((entry) => metadataFromExtractorEntry(entry, sourceLabel))
+      .filter((item) => item?.title);
+
+    if (metadata.length > 0) {
+      const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+      if (resolvedTracks.length > 0) {
+        return {
+          tracks: resolvedTracks,
+          kind: playlistKind,
+          title: extractorJson.title || playlistTitleFallback,
+        };
+      }
+    }
+  }
+
+  const singleMetadata = metadataFromExtractorEntry(extractorJson, sourceLabel);
+  if (!singleMetadata?.title) {
+    return null;
+  }
+
+  const queries = buildMetadataQueries(singleMetadata);
+  if (!queries.length) {
+    return null;
+  }
+
+  const primaryQuery = queries[0];
+  const resolvedTrack =
+    (await resolveTrackByQueryVariants(queries, requestedBy, {
+      accept: (candidate, usedQuery) =>
+        hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, usedQuery || primaryQuery),
+    }).catch(() => null)) || (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
+
+  if (!resolvedTrack) {
+    return null;
+  }
+
+  return {
+    tracks: [resolvedTrack],
+    kind: trackKind,
+    title: extractorJson.title || singleMetadata.title || trackTitleFallback,
   };
 }
 
@@ -1687,9 +1874,23 @@ async function resolveVkUrl(url, requestedBy) {
   }
 
   const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
+  const viaMetadata = await resolveViaYtDlpMetadata(url, requestedBy, {
+    sourceLabel: "VK Music",
+    cookiesPath,
+    timeoutMs: 30_000,
+    playlistKind: "vk_playlist",
+    trackKind: "vk_track",
+    playlistTitleFallback: "VK playlist",
+    trackTitleFallback: "VK track",
+  });
+  if (viaMetadata) {
+    return viaMetadata;
+  }
+
   const vkJson = await fetchYtDlpJson(url, {
     timeoutMs: 30_000,
     cookiesPath,
+    flatPlaylist: false,
   }).catch(() => null);
 
   if (!vkJson) {
