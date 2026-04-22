@@ -23,7 +23,7 @@ const {
   YTDLP_EXTRACTOR_ARGS,
   YTDLP_RUNTIME_PATH,
 } = require("../config");
-const { buildActionEmbed, buildControlsRow, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
+const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { resolveSearchCandidates } = require("./resolveTrack");
 const { safeLinkText } = require("../utils/format");
 
@@ -675,8 +675,7 @@ class GuildMusicPlayer {
     this.player.stop(true);
 
     await this.disconnectFromVoice(false);
-    await this.clearPanel();
-    await this.clearRecentPanels();
+    await this.refreshPanel({ moveToBottom: true });
     this.disposeIfIdle();
 
     return hadTracks
@@ -807,7 +806,7 @@ class GuildMusicPlayer {
 
       const payload = {
         embeds: [buildPlayerEmbed(this)],
-        components: [buildControlsRow(this)],
+        components: buildPanelComponents(this),
       };
 
       if (this.panelMessageId && !moveToBottom) {

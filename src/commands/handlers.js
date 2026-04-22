@@ -6,7 +6,10 @@ const {
   ComponentType,
   EmbedBuilder,
   MessageFlags,
+  ModalBuilder,
   StringSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   UserSelectMenuBuilder,
 } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
@@ -19,6 +22,8 @@ const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const playRequestQueueByGuild = new Map();
 const PLAY_REQUEST_TIMEOUT_MS = 30_000;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
+const QUICK_PLAY_MODAL_ID = "music:quickplay:modal";
+const QUICK_PLAY_QUERY_INPUT_ID = "music:quickplay:query";
 const VOICE_PANEL_PREFIX = "voicepanel";
 const VOICE_PANEL_STATE_TTL_MS = 30 * 60_000;
 const voicePanelStateByMessageId = new Map();
@@ -179,6 +184,21 @@ function buildTrackPickerRows(customIdPrefix, tracks) {
 
 function buildTrackPickerDescription(query, tracks) {
   return `Запрос: **${safeLinkText(query)}**\nНажми на кнопку с нужным треком (таймаут 30 сек).`;
+}
+
+async function showQuickPlayModal(interaction) {
+  const modal = new ModalBuilder().setCustomId(QUICK_PLAY_MODAL_ID).setTitle("Включить музыку");
+
+  const queryInput = new TextInputBuilder()
+    .setCustomId(QUICK_PLAY_QUERY_INPUT_ID)
+    .setLabel("Что включить?")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setPlaceholder("Ссылка или текстовый запрос")
+    .setMaxLength(300);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
+  await interaction.showModal(modal);
 }
 
 async function pickTrackFromMenu(interaction, query, tracks) {
@@ -826,7 +846,13 @@ async function handleVoicePanelComponent(interaction) {
   return true;
 }
 
-async function handlePlay(interaction, manager) {
+async function handlePlayRequest(interaction, manager, rawQuery) {
+  const query = String(rawQuery || "").trim();
+  if (!query) {
+    await interaction.reply({ content: "Укажи ссылку или текстовый запрос.", ...EPHEMERAL_REPLY }).catch(() => null);
+    return;
+  }
+
   const memberVoice = interaction.member?.voice?.channel;
   if (!memberVoice) {
     await interaction.reply({ content: "\u0417\u0430\u0439\u0434\u0438 \u0432 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043a\u0430\u043d\u0430\u043b \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438 `/play`.", ...EPHEMERAL_REPLY });
@@ -881,7 +907,6 @@ async function handlePlay(interaction, manager) {
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
       ensurePlayActive();
-      const query = interaction.options.getString("query", true);
       const isDirectUrl = isUrlLike(query);
       let tracksToAdd = [];
 
@@ -996,6 +1021,11 @@ async function handlePlay(interaction, manager) {
       clearThinkingTimer();
     }
   });
+}
+
+async function handlePlay(interaction, manager) {
+  const query = interaction.options.getString("query", true);
+  await handlePlayRequest(interaction, manager, query);
 }
 
 async function handleSkip(interaction, manager) {
@@ -1139,6 +1169,11 @@ async function handleButton(interaction, manager) {
     return;
   }
 
+  if (interaction.customId === BUTTON_IDS.quickPlay) {
+    await showQuickPlayModal(interaction);
+    return;
+  }
+
   const player = manager.get(interaction.guild.id);
   if (!player) {
     await interaction.reply({ content: "Плеер неактивен.", ...EPHEMERAL_REPLY });
@@ -1194,6 +1229,25 @@ async function handleButton(interaction, manager) {
   }
 
   await interaction.followUp({ content: "Неизвестная кнопка.", ...EPHEMERAL_REPLY });
+}
+
+async function handleModalSubmit(interaction, manager) {
+  if (!interaction.isModalSubmit() || interaction.customId !== QUICK_PLAY_MODAL_ID) {
+    return false;
+  }
+
+  if (!(await ensureMusicChannel(interaction))) {
+    return true;
+  }
+
+  const query = String(interaction.fields.getTextInputValue(QUICK_PLAY_QUERY_INPUT_ID) || "").trim();
+  if (!query) {
+    await interaction.reply({ content: "Укажи ссылку или текстовый запрос.", ...EPHEMERAL_REPLY }).catch(() => null);
+    return true;
+  }
+
+  await handlePlayRequest(interaction, manager, query);
+  return true;
 }
 
 async function handleChatInput(interaction, manager) {
@@ -1257,5 +1311,6 @@ async function handleChatInput(interaction, manager) {
 module.exports = {
   handleChatInput,
   handleButton,
+  handleModalSubmit,
   handleVoicePanelComponent,
 };

@@ -2,7 +2,7 @@ const ffmpegPath = require("ffmpeg-static");
 const path = require("path");
 const { Client, GatewayIntentBits, MessageFlags, Partials } = require("discord.js");
 const { assertEnv, DISCORD_TOKEN } = require("./config");
-const { handleButton, handleChatInput, handleVoicePanelComponent } = require("./commands/handlers");
+const { handleButton, handleChatInput, handleModalSubmit, handleVoicePanelComponent } = require("./commands/handlers");
 const { handleAiMessage } = require("./ai/chatResponder");
 const { MusicManager } = require("./music/MusicManager");
 const { initSourceAuth } = require("./music/sourceAuth");
@@ -49,6 +49,10 @@ client.once("clientReady", async () => {
   } catch (error) {
     console.warn("[Bot] Source auth init failed:", error.message);
   }
+
+  await manager.ensureIdlePanels().catch((error) => {
+    console.warn("[Bot] Idle panel init failed:", error.message);
+  });
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -56,6 +60,13 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isChatInputCommand()) {
       await handleChatInput(interaction, manager);
       return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      const handled = await handleModalSubmit(interaction, manager);
+      if (handled) {
+        return;
+      }
     }
 
     if (interaction.isButton() && interaction.customId.startsWith("music:")) {

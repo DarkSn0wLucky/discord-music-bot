@@ -8,6 +8,7 @@ const BUTTON_IDS = {
   stop: "music:stop",
   shuffle: "music:shuffle",
   loop: "music:loop",
+  quickPlay: "music:quickplay",
 };
 
 function buildPlayerEmbed(player) {
@@ -15,7 +16,7 @@ function buildPlayerEmbed(player) {
     return new EmbedBuilder()
       .setColor(EMBED_COLOR_HEX)
       .setTitle("Музыкальный плеер")
-      .setDescription("Очередь пуста. Добавь трек через `/play <ссылка или запрос>`")
+      .setDescription("Очередь пуста. Добавь трек через `/play <ссылка или запрос>` или кнопку ниже.")
       .addFields(
         { name: "Статус", value: "Ожидание", inline: true },
         { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
@@ -91,6 +92,26 @@ function buildControlsRow(player) {
   );
 }
 
+function buildQuickPlayRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(BUTTON_IDS.quickPlay)
+      .setLabel("Включить музыку")
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function buildPanelComponents(player) {
+  const idle = !player.currentTrack && player.queue.length === 0;
+  const rows = [buildControlsRow(player)];
+
+  if (idle) {
+    rows.push(buildQuickPlayRow());
+  }
+
+  return rows;
+}
+
 function buildQueueEmbed(player) {
   const current = player.currentTrack
     ? `[${truncate(safeLinkText(player.currentTrack.title), 64)}](${player.currentTrack.url})`
@@ -127,6 +148,7 @@ module.exports = {
   BUTTON_IDS,
   buildPlayerEmbed,
   buildControlsRow,
+  buildPanelComponents,
   buildQueueEmbed,
   buildActionEmbed,
 };
