@@ -211,8 +211,10 @@ class GuildMusicPlayer {
   }
 
   addTracks(tracks) {
-    const available = Math.max(0, MAX_QUEUE_SIZE - this.queue.length - (this.currentTrack ? 1 : 0));
-    const acceptedTracks = tracks.slice(0, available);
+    const available = Number.isFinite(MAX_QUEUE_SIZE)
+      ? Math.max(0, MAX_QUEUE_SIZE - this.queue.length - (this.currentTrack ? 1 : 0))
+      : tracks.length;
+    const acceptedTracks = Number.isFinite(available) ? tracks.slice(0, available) : [...tracks];
     this.queue.push(...acceptedTracks);
     return {
       accepted: acceptedTracks.length,

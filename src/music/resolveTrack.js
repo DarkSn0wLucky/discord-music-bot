@@ -28,6 +28,14 @@ const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 const networkCheckCache = new Map();
 
+function limitItems(list, limit) {
+  const items = Array.isArray(list) ? list : [];
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return items.slice();
+  }
+  return items.slice(0, Math.floor(limit));
+}
+
 const QUERY_STOPWORDS = new Set([
   "official",
   "video",
@@ -1077,7 +1085,7 @@ function buildMetadataQueries(item) {
 }
 
 async function resolveTracksFromMetadataItems(items, requestedBy) {
-  const sourceItems = Array.isArray(items) ? items.slice(0, MAX_PLAYLIST_ITEMS) : [];
+  const sourceItems = limitItems(items, MAX_PLAYLIST_ITEMS);
   if (!sourceItems.length) {
     return [];
   }
@@ -1114,10 +1122,8 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
 
       const primaryQuery = queries[0];
       const resolvedTrack =
-        (await resolveTrackByQueryVariants(queries, requestedBy, {
-          accept: (candidate, usedQuery) =>
-            hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, usedQuery || primaryQuery),
-        }).catch(() => null)) || (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
+        (await resolveTrackByQueryVariants(queries, requestedBy).catch(() => null)) ||
+        (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
 
       if (resolvedTrack) {
         queryCache.set(cacheKey, resolvedTrack);
@@ -1127,7 +1133,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy) {
   }
 
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results.filter(Boolean).slice(0, MAX_PLAYLIST_ITEMS);
+  return limitItems(results.filter(Boolean), MAX_PLAYLIST_ITEMS);
 }
 
 async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
@@ -1339,7 +1345,23 @@ async function fetchYandexPlaylistData(origin, owner, kind) {
   playlistUrl.searchParams.delete("overembed");
   playlistUrl.searchParams.set("lang", "ru");
   playlistData = await fetchJsonWithTimeout(playlistUrl.toString());
-  return playlistData?.playlist ? playlistData : null;
+  if (playlistData?.playlist) {
+    return playlistData;
+  }
+
+  const canonicalOrigin = "https://music.yandex.ru";
+  if (String(origin || "").toLowerCase() !== canonicalOrigin) {
+    const fallbackUrl = new URL("/handlers/playlist.jsx", canonicalOrigin);
+    fallbackUrl.searchParams.set("owner", String(owner));
+    fallbackUrl.searchParams.set("kinds", String(kind));
+    fallbackUrl.searchParams.set("lang", "ru");
+    playlistData = await fetchJsonWithTimeout(fallbackUrl.toString());
+    if (playlistData?.playlist) {
+      return playlistData;
+    }
+  }
+
+  return null;
 }
 
 async function resolveYandexUrl(url, requestedBy) {
@@ -1654,8 +1676,7 @@ async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
 
   const entries = Array.isArray(extractorJson.entries) ? extractorJson.entries.filter(Boolean) : [];
   if (entries.length > 0) {
-    const metadata = entries
-      .slice(0, MAX_PLAYLIST_ITEMS)
+    const metadata = limitItems(entries, MAX_PLAYLIST_ITEMS)
       .map((entry) => metadataFromExtractorEntry(entry, sourceLabel))
       .filter((item) => item?.title);
 
@@ -1683,10 +1704,8 @@ async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
 
   const primaryQuery = queries[0];
   const resolvedTrack =
-    (await resolveTrackByQueryVariants(queries, requestedBy, {
-      accept: (candidate, usedQuery) =>
-        hasQueryTokenCoverage(`${candidate?.author || ""} ${candidate?.title || ""}`, usedQuery || primaryQuery),
-    }).catch(() => null)) || (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
+    (await resolveTrackByQueryVariants(queries, requestedBy).catch(() => null)) ||
+    (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
 
   if (!resolvedTrack) {
     return null;
@@ -1763,8 +1782,7 @@ async function resolveYoutubeUrlViaYtDlp(url, requestedBy) {
 
   const entries = Array.isArray(ytJson.entries) ? ytJson.entries.filter(Boolean) : [];
   if (entries.length > 0) {
-    const tracks = entries
-      .slice(0, MAX_PLAYLIST_ITEMS)
+    const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
       .map((entry) => toYouTubeTrackFromYtDlp(entry, requestedBy, url))
       .filter((track) => track?.url);
 
@@ -1899,8 +1917,7 @@ async function resolveVkUrl(url, requestedBy) {
 
   const entries = Array.isArray(vkJson.entries) ? vkJson.entries.filter(Boolean) : [];
   if (entries.length > 0) {
-    const tracks = entries
-      .slice(0, MAX_PLAYLIST_ITEMS)
+    const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
       .map((entry) => toVkTrack(entry, requestedBy, url))
       .filter((track) => track?.url);
 
@@ -2131,7 +2148,7 @@ async function resolveSoundCloudUrl(url, requestedBy) {
   }
 
   const tracks = typeof sound.all_tracks === "function" ? await sound.all_tracks() : sound.tracks || [];
-  const mapped = tracks.slice(0, MAX_PLAYLIST_ITEMS).map((track) => toSoundCloudTrack(track, requestedBy));
+  const mapped = limitItems(tracks, MAX_PLAYLIST_ITEMS).map((track) => toSoundCloudTrack(track, requestedBy));
 
   return {
     tracks: mapped,
@@ -2206,7 +2223,14 @@ async function resolveTracks(query, requestedBy) {
         return yandexResolved;
       }
 
-      throw new Error("РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РјРµС‚Р°РґР°РЅРЅС‹Рµ РёР· СЃСЃС‹Р»РєРё РЇРЅРґРµРєСЃ РњСѓР·С‹РєРё (РІРѕР·РјРѕР¶РЅРѕ, РІСЂРµРјРµРЅРЅР°СЏ РєР°РїС‡Р°/РѕРіСЂР°РЅРёС‡РµРЅРёРµ).");
+      const yandexExternalFallback = await resolveGenericExternalUrl(input, requestedBy);
+      if (yandexExternalFallback) {
+        return yandexExternalFallback;
+      }
+
+      throw new Error(
+        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u043c\u0435\u0442\u0430\u0434\u0430\u043d\u043d\u044b\u0435 \u0438\u0437 \u0441\u0441\u044b\u043b\u043a\u0438 \u042f\u043d\u0434\u0435\u043a\u0441 \u041c\u0443\u0437\u044b\u043a\u0438 (\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e, \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043a\u0430\u043f\u0447\u0430/\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435)."
+      );
     }
 
     const spotifyResolved = await resolveSpotifyUrl(input, requestedBy).catch((error) => {
@@ -2242,7 +2266,7 @@ async function resolveTracks(query, requestedBy) {
 
     if (isVkMusicUrl) {
       throw new Error(
-        "РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ VK Music СЃСЃС‹Р»РєСѓ. Р”Р»СЏ VK С‚СЂРµРєРѕРІ/РїР»РµР№Р»РёСЃС‚РѕРІ Р±РµР· YouTube РЅСѓР¶РµРЅ Р°РєС‚СѓР°Р»СЊРЅС‹Р№ VK cookies С„Р°Р№Р» (VK_COOKIES_PATH)."
+        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443. \u0414\u043b\u044f VK \u0442\u0440\u0435\u043a\u043e\u0432/\u043f\u043b\u0435\u0439\u043b\u0438\u0441\u0442\u043e\u0432 \u043d\u0443\u0436\u0435\u043d \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0439 VK cookies \u0444\u0430\u0439\u043b (VK_COOKIES_PATH)."
       );
     }
 
@@ -2251,7 +2275,9 @@ async function resolveTracks(query, requestedBy) {
       return externalResolved;
     }
 
-    throw new Error("РЎСЃС‹Р»РєР° РЅРµ РїРѕРґРґРµСЂР¶РёРІР°РµС‚СЃСЏ РёР»Рё РЅРµРґРѕСЃС‚СѓРїРЅР° Р±РµР· Р°РІС‚РѕСЂРёР·Р°С†РёРё. РСЃРїРѕР»СЊР·СѓР№ YouTube/SoundCloud/Spotify/Deezer Р»РёР±Рѕ РїСѓР±Р»РёС‡РЅСѓСЋ СЃСЃС‹Р»РєСѓ.");
+    throw new Error(
+      "\u0421\u0441\u044b\u043b\u043a\u0430 \u043d\u0435 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044f \u0438\u043b\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430 \u0431\u0435\u0437 \u0430\u0432\u0442\u043e\u0440\u0438\u0437\u0430\u0446\u0438\u0438. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439 YouTube/SoundCloud/Spotify/Deezer \u043b\u0438\u0431\u043e \u043f\u0443\u0431\u043b\u0438\u0447\u043d\u0443\u044e \u0441\u0441\u044b\u043b\u043a\u0443."
+    );
   }
 
   return resolveFromSearch(input, requestedBy);

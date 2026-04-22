@@ -11,6 +11,28 @@ function asNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function asLimit(value, fallback = Number.POSITIVE_INFINITY) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["inf", "infinity", "unlimited", "none", "off"].includes(normalized)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  if (parsed <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.floor(parsed);
+}
+
 function asBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === "") {
     return fallback;
@@ -87,8 +109,8 @@ module.exports = {
   YTDLP_EXTRACTOR_ARGS: normalizeYtExtractorArgs(process.env.YTDLP_EXTRACTOR_ARGS),
   VK_COOKIES_PATH: process.env.VK_COOKIES_PATH || "",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
-  MAX_QUEUE_SIZE: asNumber(process.env.MAX_QUEUE_SIZE, 150),
-  MAX_PLAYLIST_ITEMS: asNumber(process.env.MAX_PLAYLIST_ITEMS, 50),
+  MAX_QUEUE_SIZE: asLimit(process.env.MAX_QUEUE_SIZE, Number.POSITIVE_INFINITY),
+  MAX_PLAYLIST_ITEMS: asLimit(process.env.MAX_PLAYLIST_ITEMS, Number.POSITIVE_INFINITY),
   AUTO_DISCONNECT_MS: asNumber(process.env.AUTO_DISCONNECT_MS, 180_000),
   DEFAULT_VOLUME: asNumber(process.env.DEFAULT_VOLUME, 0.75),
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
