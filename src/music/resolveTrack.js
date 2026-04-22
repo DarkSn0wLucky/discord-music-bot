@@ -28,7 +28,7 @@ const METADATA_RESOLVE_CONCURRENCY = 3;
 const METADATA_RESOLVE_CONCURRENCY_FAST = 8;
 const METADATA_ITEM_RESOLVE_TIMEOUT_MS = 12_000;
 const METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS = 4_000;
-const PLAYLIST_RESOLVE_BUDGET_MS = 45_000;
+const PLAYLIST_RESOLVE_BUDGET_MS = 90_000;
 const PLAYLIST_FAST_MODE_THRESHOLD = 40;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
@@ -1232,11 +1232,11 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
       const resolvePromise = (async () => {
         return (
           (await resolveTrackByQueryVariants(queries, requestedBy, {
-            allowYtdlpFallback: false,
+            allowYtdlpFallback: true,
             accept: acceptCandidate,
           }).catch(() => null)) ||
           (await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
-            allowYtdlpFallback: false,
+            allowYtdlpFallback: true,
             accept: acceptCandidate,
           }).catch(() => null))
         );
