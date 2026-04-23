@@ -2148,6 +2148,10 @@ async function isYandexPlaylistRegionBlocked(info, originalUrl) {
 
 async function resolveYandexPlaylistTarget(info, originalUrl) {
   const directTarget = parseYandexOwnerKindPair(info?.playlistOwner, info?.playlistKind);
+  if (directTarget?.owner && directTarget?.kind && !String(info?.playlistUuid || "").trim()) {
+    return directTarget;
+  }
+
   if (isCanonicalYandexPlaylistTarget(directTarget)) {
     return directTarget;
   }
