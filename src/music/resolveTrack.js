@@ -2426,6 +2426,15 @@ function fetchYtDlpJson(url, options = {}) {
   return new Promise((resolve, reject) => {
     const flatPlaylist = options.flatPlaylist !== false;
     const normalizedTarget = String(url || "").trim().toLowerCase();
+    const parsedTarget = (() => {
+      try {
+        return new URL(String(url || "").trim());
+      } catch {
+        return null;
+      }
+    })();
+    const isVkTarget = Boolean(parsedTarget && isVkMusicHost(parsedTarget.hostname));
+    const isYandexTarget = Boolean(parsedTarget && isYandexMusicHost(parsedTarget.hostname));
     const isYouTubeTarget =
       normalizedTarget.startsWith("ytsearch") ||
       /(?:youtube\.com|youtu\.be)/i.test(normalizedTarget);
@@ -2442,6 +2451,18 @@ function fetchYtDlpJson(url, options = {}) {
       if (extractorArgs) {
         args.push("--extractor-args", extractorArgs);
       }
+    }
+
+    if (isVkTarget || isYandexTarget) {
+      args.push("--impersonate", "chrome");
+    }
+
+    if (isVkTarget) {
+      args.push("--referer", "https://vk.com/");
+    }
+
+    if (isYandexTarget) {
+      args.push("--referer", "https://music.yandex.ru/");
     }
 
     if (flatPlaylist) {
