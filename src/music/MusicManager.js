@@ -1,10 +1,12 @@
-﻿const { ChannelType } = require("discord.js");
+﻿const { AudioPlayerStatus, getVoiceConnection } = require("@discordjs/voice");
+const { ChannelType } = require("discord.js");
 const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { buildPanelComponents, buildPlayerEmbed } = require("../ui/panel");
 const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const IDLE_PANEL_BUMP_MS = 5 * 60_000;
+const QUICKPLAY_BUTTON_ID = "music:quickplay";
 
 function normalizeChannelName(value) {
   return String(value || "")
@@ -61,6 +63,17 @@ class MusicManager {
     );
   }
 
+  hasQuickPlayButton(message) {
+    if (!message || !Array.isArray(message.components)) {
+      return false;
+    }
+
+    return message.components.some((row) =>
+      Array.isArray(row.components) &&
+      row.components.some((component) => component?.customId === QUICKPLAY_BUTTON_ID)
+    );
+  }
+
   async resolveMusicTextChannel(guild) {
     if (!guild) {
       return null;
@@ -107,11 +120,29 @@ class MusicManager {
 
     const player = this.players.get(guild.id);
     if (player) {
-      const hasActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0 || player.transitionLock;
+      const voiceConnection = player.connection || getVoiceConnection(guild.id);
+      const hasVoiceConnection = Boolean(voiceConnection);
+      const playerState = player.player?.state?.status;
+      const hasPlaybackState =
+        playerState === AudioPlayerStatus.Playing ||
+        playerState === AudioPlayerStatus.Paused ||
+        playerState === AudioPlayerStatus.AutoPaused ||
+        playerState === AudioPlayerStatus.Buffering;
 
+      if (!hasVoiceConnection && !hasPlaybackState && (player.currentTrack || player.queue.length > 0 || player.transitionLock)) {
+        player.currentTrack = null;
+        player.queue = [];
+        player.transitionLock = false;
+        player.forceSkip = false;
+        player.preservePanelOnNextTrack = false;
+        player.suppressNextTrackAction = false;
+        player.stopProgressUpdater();
+      }
+
+      const hasActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0 || player.transitionLock;
       if (!hasActivePlayback) {
         await player.setTextChannel(channel.id);
-        await player.refreshPanel({ moveToBottom });
+        await player.refreshPanel({ moveToBottom: true });
         return;
       }
     }
@@ -124,7 +155,14 @@ class MusicManager {
       : [];
 
     if (panelMessages.length > 0 && !moveToBottom) {
-      return;
+      const latestPanel = panelMessages[0];
+      if (this.hasQuickPlayButton(latestPanel)) {
+        return;
+      }
+
+      for (const message of panelMessages) {
+        await message.delete().catch(() => null);
+      }
     }
 
     if (moveToBottom) {
