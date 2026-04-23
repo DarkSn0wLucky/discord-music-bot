@@ -2346,22 +2346,6 @@ async function resolveYandexUrl(url, requestedBy) {
           };
         });
 
-        const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy, {
-          strictMatch: false,
-          allowSyntheticFallback: false,
-          allowYtdlpFallback: true,
-          disableSecondaryMetadataLookup: false,
-          resolveBudgetMs: 90_000,
-          itemResolveTimeoutMs: 15_000,
-        });
-        if (resolvedTracks.length > 0) {
-          return {
-            tracks: resolvedTracks,
-            kind: "yandex_playlist",
-            title: playlist?.title || "Yandex playlist",
-          };
-        }
-
         const searchFallbackTracks = metadata
           .map((item) =>
             buildMetadataFallbackTrack(
