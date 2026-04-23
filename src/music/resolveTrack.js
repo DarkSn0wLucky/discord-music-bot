@@ -25,7 +25,7 @@ const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
 const METADATA_RESOLVE_CONCURRENCY = 3;
-const METADATA_RESOLVE_CONCURRENCY_FAST = 8;
+const METADATA_RESOLVE_CONCURRENCY_FAST = 5;
 const METADATA_ITEM_RESOLVE_TIMEOUT_MS = 12_000;
 const METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS = 4_000;
 const PLAYLIST_RESOLVE_BUDGET_MS = 90_000;
@@ -1284,6 +1284,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
 
   const allowSyntheticFallback = options.allowSyntheticFallback === true;
   const strictMatch = options.strictMatch !== false;
+  const allowYtdlpFallback = options.allowYtdlpFallback === true;
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const results = new Array(sourceItems.length).fill(null);
@@ -1333,11 +1334,11 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
       const resolvePromise = (async () => {
         return (
           (await resolveTrackByQueryVariants(queries, requestedBy, {
-            allowYtdlpFallback: true,
+            allowYtdlpFallback,
             accept: acceptCandidate,
           }).catch(() => null)) ||
           (await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
-            allowYtdlpFallback: true,
+            allowYtdlpFallback,
             accept: acceptCandidate,
           }).catch(() => null))
         );
