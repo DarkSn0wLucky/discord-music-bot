@@ -1547,6 +1547,18 @@ function parseYandexPlaylistTargetFromHtml(html) {
   return null;
 }
 
+function isYandexRegionBlockedHtml(html) {
+  const source = String(html || "").toLowerCase();
+  if (!source) {
+    return false;
+  }
+
+  return (
+    source.includes("яндекс музыка") &&
+    source.includes("недоступна в вашем регионе")
+  );
+}
+
 async function resolveYandexPlaylistTarget(info, originalUrl) {
   if (info.playlistOwner && info.playlistKind) {
     return {
@@ -1580,6 +1592,10 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
 
   if (!response || response.statusCode < 200 || response.statusCode >= 300) {
     return null;
+  }
+
+  if (isYandexRegionBlockedHtml(response.body)) {
+    return { blocked: true };
   }
 
   const resolvedTarget = parseYandexPlaylistTargetFromHtml(response.body);
@@ -1634,15 +1650,19 @@ async function resolveYandexUrl(url, requestedBy) {
 
   if (info.playlistKind || info.playlistUuid) {
     const target = await resolveYandexPlaylistTarget(info, url);
+    if (target?.blocked) {
+      throw new Error("Яндекс Музыка недоступна на сервере по региону. Плейлист прочитать нельзя.");
+    }
+
     if (!target?.owner || !target?.kind) {
-      return null;
+      throw new Error("Не удалось определить owner/kind у плейлиста Яндекс Музыки.");
     }
 
     const playlistData = await fetchYandexPlaylistData(info.origin, target.owner, target.kind);
     const playlist = playlistData?.playlist;
     const rawTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
     if (rawTracks.length === 0) {
-      return null;
+      throw new Error("Плейлист Яндекс Музыки пуст или недоступен для чтения.");
     }
 
     const metadata = rawTracks.map((item) => {
@@ -1664,6 +1684,8 @@ async function resolveYandexUrl(url, requestedBy) {
         title: playlist?.title || "Yandex playlist",
       };
     }
+
+    throw new Error("Не удалось сопоставить треки плейлиста Яндекс Музыки с YouTube.");
   }
 
   if (info.trackId) {
@@ -2499,16 +2521,22 @@ async function resolveTracks(query, requestedBy) {
 
     const yandexInfo = parseYandexUrlInfo(input);
     if (yandexInfo) {
-      const yandexResolved = await resolveYandexUrl(input, requestedBy).catch((error) => {
-        console.warn(`[Resolve] Yandex URL fallback (${input}): ${error.message}`);
-        return null;
-      });
-      if (yandexResolved) {
-        return yandexResolved;
-      }
+    let yandexResolveError = null;
+    const yandexResolved = await resolveYandexUrl(input, requestedBy).catch((error) => {
+      yandexResolveError = error;
+      console.warn(`[Resolve] Yandex URL fallback (${input}): ${error.message}`);
+      return null;
+    });
+    if (yandexResolved) {
+      return yandexResolved;
+    }
 
-      throw new Error(
-        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u043c\u0435\u0442\u0430\u0434\u0430\u043d\u043d\u044b\u0435 \u0438\u0437 \u0441\u0441\u044b\u043b\u043a\u0438 \u042f\u043d\u0434\u0435\u043a\u0441 \u041c\u0443\u0437\u044b\u043a\u0438 (\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e, \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043a\u0430\u043f\u0447\u0430/\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435)."
+    if (yandexResolveError?.message) {
+      throw new Error(yandexResolveError.message);
+    }
+
+    throw new Error(
+      "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u043c\u0435\u0442\u0430\u0434\u0430\u043d\u043d\u044b\u0435 \u0438\u0437 \u0441\u0441\u044b\u043b\u043a\u0438 \u042f\u043d\u0434\u0435\u043a\u0441 \u041c\u0443\u0437\u044b\u043a\u0438 (\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e, \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u0430\u044f \u043a\u0430\u043f\u0447\u0430/\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u0435)."
       );
     }
 
