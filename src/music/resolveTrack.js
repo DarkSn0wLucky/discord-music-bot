@@ -1714,6 +1714,75 @@ function fetchJsonViaCurl(url, options = {}) {
   });
 }
 
+function requestTextViaCurl(url, options = {}) {
+  return new Promise((resolve) => {
+    const timeoutMs = Number(options.timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS;
+    const maxTimeSec = Math.max(4, Math.ceil(timeoutMs / 1000));
+    const args = [
+      "-sS",
+      "-L",
+      "--max-time",
+      String(maxTimeSec),
+      "-A",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      "-H",
+      "accept: text/html,application/xhtml+xml",
+      "-H",
+      "accept-language: ru,en-US;q=0.9,en;q=0.8",
+      "-H",
+      "referer: https://music.yandex.ru/",
+      "--write-out",
+      "\n__CURL_META__%{http_code}|%{url_effective}",
+      String(url),
+    ];
+
+    if (shouldUseHomeL2tpForUrl(url) && isHomeL2tpEnabled()) {
+      args.splice(5, 0, "--interface", String(L2TP_SOURCE_IP).trim());
+    }
+
+    const cookiePath = resolveExistingFilePath(options.cookiesPath) || getCookiePathForUrl(url);
+    if (cookiePath) {
+      args.splice(5, 0, "--cookie", cookiePath);
+    }
+
+    execFile(
+      "curl",
+      args,
+      {
+        timeout: timeoutMs + 2_000,
+        windowsHide: true,
+        maxBuffer: 8 * 1024 * 1024,
+      },
+      (error, stdout) => {
+        if (error || !stdout) {
+          resolve(null);
+          return;
+        }
+
+        const output = String(stdout);
+        const markerIndex = output.lastIndexOf("\n__CURL_META__");
+        if (markerIndex < 0) {
+          resolve(null);
+          return;
+        }
+
+        const body = output.slice(0, markerIndex);
+        const metaRaw = output.slice(markerIndex + "\n__CURL_META__".length).trim();
+        const [statusRaw, finalUrlRaw] = metaRaw.split("|");
+        const statusCode = Number(statusRaw) || 0;
+        const finalUrl = String(finalUrlRaw || "").trim() || String(url);
+
+        resolve({
+          statusCode,
+          body,
+          finalUrl,
+          headers: {},
+        });
+      }
+    );
+  });
+}
+
 async function fetchJsonWithTimeout(url) {
   try {
     const cookiePath = getCookiePathForUrl(url);
@@ -1838,17 +1907,22 @@ async function isYandexPlaylistRegionBlocked(info, originalUrl) {
     return cached.blocked;
   }
 
-  const response = await requestTextWithRedirect(originalUrl, {
-    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
-    cookiesPath: YANDEX_COOKIES_PATH,
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-      accept: "text/html,application/xhtml+xml",
-      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
-      referer: "https://music.yandex.ru/",
-    },
-  }).catch(() => null);
+  const response =
+    (await requestTextViaCurl(originalUrl, {
+      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      cookiesPath: YANDEX_COOKIES_PATH,
+    }).catch(() => null)) ||
+    (await requestTextWithRedirect(originalUrl, {
+      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      cookiesPath: YANDEX_COOKIES_PATH,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+        referer: "https://music.yandex.ru/",
+      },
+    }).catch(() => null));
 
   const blocked = Boolean(response && response.statusCode >= 200 && response.statusCode < 300 && isYandexBlockedResponse(response));
   yandexRegionCheckCache.set(cacheKey, { blocked, checkedAt: Date.now() });
@@ -1875,17 +1949,22 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     };
   }
 
-  const response = await requestTextWithRedirect(originalUrl, {
-    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
-    cookiesPath: YANDEX_COOKIES_PATH,
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-      accept: "text/html,application/xhtml+xml",
-      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
-      referer: "https://music.yandex.ru/",
-    },
-  }).catch(() => null);
+  const response =
+    (await requestTextViaCurl(originalUrl, {
+      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      cookiesPath: YANDEX_COOKIES_PATH,
+    }).catch(() => null)) ||
+    (await requestTextWithRedirect(originalUrl, {
+      timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      cookiesPath: YANDEX_COOKIES_PATH,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+        "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+        referer: "https://music.yandex.ru/",
+      },
+    }).catch(() => null));
 
   if (!response || response.statusCode < 200 || response.statusCode >= 300) {
     return null;
