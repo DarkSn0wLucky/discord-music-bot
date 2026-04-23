@@ -11,6 +11,7 @@ const {
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REFRESH_TOKEN,
   L2TP_SOURCE_IP,
+  YANDEX_COOKIES_PATH,
   VK_COOKIES_PATH,
   YANDEX_PLAYLIST_HINTS,
   YOUTUBE_API_KEY,
@@ -33,9 +34,11 @@ const PLAYLIST_RESOLVE_BUDGET_MS = 90_000;
 const PLAYLIST_FAST_MODE_THRESHOLD = 40;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const YANDEX_REGION_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
+const COOKIES_FILE_CACHE_TTL_MS = 30 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 const networkCheckCache = new Map();
 const yandexRegionCheckCache = new Map();
+const cookiesFileCache = new Map();
 const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
 
 function isHomeL2tpEnabled() {
@@ -53,6 +56,175 @@ function shouldUseHomeL2tpForUrl(value) {
   } catch {
     return false;
   }
+}
+
+function normalizeCookieDomain(rawDomain) {
+  return String(rawDomain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^#httponly_/i, "")
+    .replace(/^\.+/, "");
+}
+
+function getCookiePathForUrl(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    if (isYandexMusicHost(parsed.hostname)) {
+      return resolveExistingFilePath(YANDEX_COOKIES_PATH) || null;
+    }
+
+    if (isVkMusicHost(parsed.hostname)) {
+      return resolveExistingFilePath(VK_COOKIES_PATH) || null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function parseNetscapeCookieLine(line) {
+  const parts = String(line || "").split("\t");
+  if (parts.length < 7) {
+    return null;
+  }
+
+  const [domainRaw, includeSubdomainsRaw, pathRaw, secureRaw, _expiresRaw, nameRaw, ...valueParts] = parts;
+  const name = String(nameRaw || "").trim();
+  const value = String(valueParts.join("\t") || "").trim();
+  const domain = normalizeCookieDomain(domainRaw);
+  if (!domain || !name) {
+    return null;
+  }
+
+  return {
+    domain,
+    includeSubdomains: String(includeSubdomainsRaw || "").trim().toUpperCase() === "TRUE",
+    path: String(pathRaw || "/").trim() || "/",
+    secure: String(secureRaw || "").trim().toUpperCase() === "TRUE",
+    name,
+    value,
+  };
+}
+
+function parseCookieFileContent(rawContent) {
+  const content = String(rawContent || "").trim();
+  if (!content) {
+    return [];
+  }
+
+  if (content.startsWith("[") || content.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(content);
+      const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed.cookies) ? parsed.cookies : [];
+      return entries
+        .map((entry) => ({
+          domain: normalizeCookieDomain(entry?.domain),
+          includeSubdomains: String(entry?.hostOnly ?? "").toLowerCase() === "false",
+          path: String(entry?.path || "/").trim() || "/",
+          secure: Boolean(entry?.secure),
+          name: String(entry?.name || "").trim(),
+          value: String(entry?.value || "").trim(),
+        }))
+        .filter((entry) => entry.domain && entry.name);
+    } catch {
+      return [];
+    }
+  }
+
+  return content
+    .split(/\r?\n/)
+    .map((line) => String(line || "").trim())
+    .filter((line) => line && (!line.startsWith("#") || line.startsWith("#HttpOnly_")))
+    .map(parseNetscapeCookieLine)
+    .filter(Boolean);
+}
+
+function readCookiesFromFile(cookiesPath) {
+  const absolutePath = resolveExistingFilePath(cookiesPath);
+  if (!absolutePath) {
+    return [];
+  }
+
+  const cached = cookiesFileCache.get(absolutePath);
+  if (cached && Date.now() - cached.checkedAt <= COOKIES_FILE_CACHE_TTL_MS) {
+    return cached.cookies;
+  }
+
+  try {
+    const rawContent = fs.readFileSync(absolutePath, "utf8");
+    const cookies = parseCookieFileContent(rawContent);
+    cookiesFileCache.set(absolutePath, { cookies, checkedAt: Date.now() });
+    return cookies;
+  } catch {
+    cookiesFileCache.set(absolutePath, { cookies: [], checkedAt: Date.now() });
+    return [];
+  }
+}
+
+function hostMatchesCookieDomain(hostname, domain, includeSubdomains) {
+  const host = String(hostname || "").toLowerCase();
+  const normalizedDomain = normalizeCookieDomain(domain);
+  if (!host || !normalizedDomain) {
+    return false;
+  }
+
+  if (host === normalizedDomain) {
+    return true;
+  }
+
+  if (includeSubdomains && host.endsWith(`.${normalizedDomain}`)) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
+  let parsed;
+  try {
+    parsed = new URL(String(url || "").trim());
+  } catch {
+    return "";
+  }
+
+  const cookiesPath = resolveExistingFilePath(explicitCookiesPath) || getCookiePathForUrl(parsed.toString());
+  if (!cookiesPath) {
+    return "";
+  }
+
+  const cookies = readCookiesFromFile(cookiesPath);
+  if (!cookies.length) {
+    return "";
+  }
+
+  const host = String(parsed.hostname || "").toLowerCase();
+  const pathName = String(parsed.pathname || "/");
+  const isHttps = parsed.protocol === "https:";
+  const map = new Map();
+
+  for (const cookie of cookies) {
+    if (!hostMatchesCookieDomain(host, cookie.domain, cookie.includeSubdomains)) {
+      continue;
+    }
+
+    const cookiePath = String(cookie.path || "/");
+    if (!pathName.startsWith(cookiePath)) {
+      continue;
+    }
+
+    if (cookie.secure && !isHttps) {
+      continue;
+    }
+
+    map.set(cookie.name, cookie.value);
+  }
+
+  if (map.size === 0) {
+    return "";
+  }
+
+  return [...map.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
 }
 
 function limitItems(list, limit) {
@@ -1304,7 +1476,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
 
   const allowSyntheticFallback = options.allowSyntheticFallback === true;
   const strictMatch = options.strictMatch !== false;
-  const allowYtdlpFallback = options.allowYtdlpFallback === true;
+  const allowYtdlpFallback = options.allowYtdlpFallback !== false;
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const results = new Array(sourceItems.length).fill(null);
@@ -1415,9 +1587,14 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   const runRequest = (forcedLocalAddress = "") =>
     new Promise((resolve, reject) => {
       const client = parsedUrl.protocol === "http:" ? http : https;
+      const cookieHeader = buildCookieHeaderForUrl(parsedUrl.toString(), options.cookiesPath || "");
+      const normalizedHeaders = { ...headers };
+      if (cookieHeader && !normalizedHeaders.cookie && !normalizedHeaders.Cookie) {
+        normalizedHeaders.cookie = cookieHeader;
+      }
       const requestOptions = {
         method: "GET",
-        headers,
+        headers: normalizedHeaders,
       };
 
       if (forcedLocalAddress) {
@@ -1479,7 +1656,7 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   }
 }
 
-function fetchJsonViaCurl(url) {
+function fetchJsonViaCurl(url, options = {}) {
   return new Promise((resolve) => {
     const maxTimeSec = Math.max(4, Math.ceil(EXTERNAL_FETCH_TIMEOUT_MS / 1000));
     const args = [
@@ -1500,6 +1677,11 @@ function fetchJsonViaCurl(url) {
 
     if (shouldUseHomeL2tpForUrl(url) && isHomeL2tpEnabled()) {
       args.splice(5, 0, "--interface", String(L2TP_SOURCE_IP).trim());
+    }
+
+    const cookiePath = resolveExistingFilePath(options.cookiesPath) || getCookiePathForUrl(url);
+    if (cookiePath) {
+      args.splice(5, 0, "--cookie", cookiePath);
     }
 
     execFile(
@@ -1534,19 +1716,26 @@ function fetchJsonViaCurl(url) {
 
 async function fetchJsonWithTimeout(url) {
   try {
-    const curlJson = await fetchJsonViaCurl(url);
+    const cookiePath = getCookiePathForUrl(url);
+    const cookieHeader = buildCookieHeaderForUrl(url, cookiePath || "");
+
+    const curlJson = await fetchJsonViaCurl(url, {
+      cookiesPath: cookiePath || "",
+    });
     if (curlJson) {
       return curlJson;
     }
 
     const response = await requestTextWithRedirect(url, {
       timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+      cookiesPath: cookiePath || "",
       headers: {
         "user-agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         accept: "application/json,text/plain,*/*",
         "accept-language": "ru,en-US;q=0.9,en;q=0.8",
         referer: "https://music.yandex.ru/",
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
       },
     });
 
@@ -1651,6 +1840,7 @@ async function isYandexPlaylistRegionBlocked(info, originalUrl) {
 
   const response = await requestTextWithRedirect(originalUrl, {
     timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    cookiesPath: YANDEX_COOKIES_PATH,
     headers: {
       "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -1687,6 +1877,7 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
 
   const response = await requestTextWithRedirect(originalUrl, {
     timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    cookiesPath: YANDEX_COOKIES_PATH,
     headers: {
       "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -1897,7 +2088,7 @@ async function resolveYandexUrl(url, requestedBy) {
 
   const ytdlpFallback = await resolveViaYtDlpMetadata(url, requestedBy, {
     sourceLabel: "Yandex Music",
-    cookiesPath: YTDLP_COOKIES_PATH,
+    cookiesPath: YANDEX_COOKIES_PATH || YTDLP_COOKIES_PATH,
     timeoutMs: 30_000,
     playlistKind: "yandex_playlist",
     trackKind: "yandex_track",
