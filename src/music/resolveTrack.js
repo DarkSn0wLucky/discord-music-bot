@@ -38,6 +38,9 @@ const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const YANDEX_REGION_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const COOKIES_FILE_CACHE_TTL_MS = 30 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
+const ENABLE_L2TP_BIND = ["1", "true", "yes", "on", "enabled"].includes(
+  String(process.env.ENABLE_L2TP_BIND || "").trim().toLowerCase()
+);
 const networkCheckCache = new Map();
 const yandexRegionCheckCache = new Map();
 const cookiesFileCache = new Map();
@@ -84,7 +87,7 @@ function canUseConfiguredL2tpAddress() {
 }
 
 function isHomeL2tpEnabled() {
-  return Boolean(String(L2TP_SOURCE_IP || "").trim()) && canUseConfiguredL2tpAddress();
+  return ENABLE_L2TP_BIND && Boolean(String(L2TP_SOURCE_IP || "").trim()) && canUseConfiguredL2tpAddress();
 }
 
 function shouldUseHomeL2tpForUrl(value) {
