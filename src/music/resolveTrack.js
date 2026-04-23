@@ -10,6 +10,7 @@ const {
   SPOTIFY_CLIENT_ID,
   SPOTIFY_CLIENT_SECRET,
   SPOTIFY_REFRESH_TOKEN,
+  L2TP_SOURCE_IP,
   VK_COOKIES_PATH,
   YANDEX_PLAYLIST_HINTS,
   YOUTUBE_API_KEY,
@@ -36,6 +37,23 @@ const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && S
 const networkCheckCache = new Map();
 const yandexRegionCheckCache = new Map();
 const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
+
+function isHomeL2tpEnabled() {
+  return Boolean(String(L2TP_SOURCE_IP || "").trim());
+}
+
+function shouldUseHomeL2tpForUrl(value) {
+  if (!isHomeL2tpEnabled()) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return isYandexMusicHost(parsed.hostname) || isVkMusicHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
 
 function limitItems(list, limit) {
   const items = Array.isArray(list) ? list : [];
@@ -1390,21 +1408,36 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
     throw new Error("Blocked target URL");
   }
 
-  return new Promise((resolve, reject) => {
-    const client = parsedUrl.protocol === "http:" ? http : https;
-    const req = client.request(
-      parsedUrl,
-      {
+  const preferredLocalAddress = String(options.localAddress || "").trim();
+  const autoLocalAddress = shouldUseHomeL2tpForUrl(parsedUrl.toString()) ? String(L2TP_SOURCE_IP || "").trim() : "";
+  const localAddress = preferredLocalAddress || autoLocalAddress;
+
+  const runRequest = (forcedLocalAddress = "") =>
+    new Promise((resolve, reject) => {
+      const client = parsedUrl.protocol === "http:" ? http : https;
+      const requestOptions = {
         method: "GET",
         headers,
-      },
-      (res) => {
+      };
+
+      if (forcedLocalAddress) {
+        requestOptions.localAddress = forcedLocalAddress;
+      }
+
+      const req = client.request(parsedUrl, requestOptions, (res) => {
         const statusCode = Number(res.statusCode) || 0;
         const location = String(res.headers.location || "");
         if (location && statusCode >= 300 && statusCode < 400 && redirectCount < maxRedirects) {
           const nextUrl = new URL(location, parsedUrl).toString();
           res.resume();
-          requestTextWithRedirect(nextUrl, options, redirectCount + 1)
+          requestTextWithRedirect(
+            nextUrl,
+            {
+              ...options,
+              localAddress: forcedLocalAddress || options.localAddress || "",
+            },
+            redirectCount + 1
+          )
             .then(resolve)
             .catch(reject);
           return;
@@ -1421,15 +1454,29 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
             headers: res.headers,
           });
         });
-      }
-    );
+      });
 
-    req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error("Request timeout"));
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error("Request timeout"));
+      });
+      req.on("error", reject);
+      req.end();
     });
-    req.on("error", reject);
-    req.end();
-  });
+
+  if (!localAddress) {
+    return runRequest("");
+  }
+
+  try {
+    return await runRequest(localAddress);
+  } catch (error) {
+    const code = String(error?.code || "").toUpperCase();
+    const shouldFallback = code === "EADDRNOTAVAIL" || code === "ENETUNREACH" || code === "EHOSTUNREACH";
+    if (!shouldFallback) {
+      throw error;
+    }
+    return runRequest("");
+  }
 }
 
 function fetchJsonViaCurl(url) {
@@ -1450,6 +1497,10 @@ function fetchJsonViaCurl(url) {
       "referer: https://music.yandex.ru/",
       String(url),
     ];
+
+    if (shouldUseHomeL2tpForUrl(url) && isHomeL2tpEnabled()) {
+      args.splice(5, 0, "--interface", String(L2TP_SOURCE_IP).trim());
+    }
 
     execFile(
       "curl",
@@ -2196,6 +2247,11 @@ function fetchYtDlpJson(url, options = {}) {
 
     if (flatPlaylist) {
       args.push("--flat-playlist");
+    }
+
+    const forceHomeSource = options.forceHomeSource === true || shouldUseHomeL2tpForUrl(url);
+    if (forceHomeSource && isHomeL2tpEnabled()) {
+      args.push("--source-address", String(L2TP_SOURCE_IP || "").trim());
     }
 
     const playlistEnd = Number(options.playlistEnd);

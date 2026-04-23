@@ -15,6 +15,7 @@ const fs = require("fs");
 const path = require("path");
 const {
   DEFAULT_VOLUME,
+  L2TP_SOURCE_IP,
   MAX_QUEUE_SIZE,
   VK_COOKIES_PATH,
   YTDLP_BIN,
@@ -31,6 +32,21 @@ const PLAY_START_TIMEOUT_MS = 20_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const ACTION_DEDUPE_WINDOW_MS = 4_000;
 const cookiesPathCache = new Map();
+
+function shouldUseHomeL2tpForPlaybackUrl(value) {
+  const sourceIp = String(L2TP_SOURCE_IP || "").trim();
+  if (!sourceIp) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "music.yandex.ru" || host.startsWith("music.yandex.") || host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
+  } catch {
+    return false;
+  }
+}
 
 function resolveConfiguredCookiesPath(configuredPath) {
   const value = String(configuredPath || "").trim();
@@ -329,6 +345,10 @@ class GuildMusicPlayer {
 
           if (String(next.source || "").toLowerCase().includes("vk")) {
             ytDlpArgs.push("--referer", "https://vk.com/");
+          }
+
+          if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl)) {
+            ytDlpArgs.push("--source-address", String(L2TP_SOURCE_IP || "").trim());
           }
 
           if (cookiesPath) {
