@@ -16,8 +16,8 @@ const {
   YTDLP_BIN,
   YTDLP_COOKIES_PATH,
   YTDLP_EXTRACTOR_ARGS,
-  YTDLP_RUNTIME_PATH,
 } = require("../config");
+const { buildYtDlpEnv } = require("./ytdlpEnv");
 
 const SEARCH_RESULTS_LIMIT = 8;
 const SEARCH_TRACK_PACK_SIZE = 5;
@@ -2127,13 +2127,7 @@ function fetchYtDlpJson(url, options = {}) {
 
     args.push(String(url));
 
-    const runtimePath = String(YTDLP_RUNTIME_PATH || "").trim();
-    const executionEnv = runtimePath
-      ? {
-          ...process.env,
-          PATH: `${runtimePath}${path.delimiter}${process.env.PATH || ""}`,
-        }
-      : process.env;
+    const executionEnv = buildYtDlpEnv(process.env);
 
     execFile(
       YTDLP_BIN,

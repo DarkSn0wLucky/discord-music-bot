@@ -20,10 +20,10 @@ const {
   YTDLP_BIN,
   YTDLP_COOKIES_PATH,
   YTDLP_EXTRACTOR_ARGS,
-  YTDLP_RUNTIME_PATH,
 } = require("../config");
 const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { resolveSearchCandidates } = require("./resolveTrack");
+const { buildYtDlpEnv } = require("./ytdlpEnv");
 const { safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
@@ -338,13 +338,7 @@ class GuildMusicPlayer {
 
           ytDlpArgs.push(playbackUrl);
 
-          const runtimePath = String(YTDLP_RUNTIME_PATH || "").trim();
-          const ytDlpEnv = runtimePath
-            ? {
-                ...process.env,
-                PATH: `${runtimePath}${path.delimiter}${process.env.PATH || ""}`,
-              }
-            : process.env;
+          const ytDlpEnv = buildYtDlpEnv(process.env);
 
           const ytDlp = spawn(YTDLP_BIN, ytDlpArgs, {
             stdio: ["ignore", "pipe", "pipe"],

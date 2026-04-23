@@ -106,6 +106,7 @@ module.exports = {
   YTDLP_COOKIES_PATH: process.env.YTDLP_COOKIES_PATH || "cookies.txt",
   YTDLP_BIN: process.env.YTDLP_BIN || "yt-dlp",
   YTDLP_RUNTIME_PATH: process.env.YTDLP_RUNTIME_PATH || "",
+  YTDLP_TMP_DIR: process.env.YTDLP_TMP_DIR || ".cache/yt-dlp-tmp",
   YTDLP_EXTRACTOR_ARGS: normalizeYtExtractorArgs(process.env.YTDLP_EXTRACTOR_ARGS),
   VK_COOKIES_PATH: process.env.VK_COOKIES_PATH || "",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
