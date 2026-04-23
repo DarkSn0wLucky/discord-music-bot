@@ -1561,6 +1561,31 @@ function isYandexRegionBlockedHtml(html) {
   );
 }
 
+function isYandexCaptchaHtml(html) {
+  const source = String(html || "").toLowerCase();
+  if (!source) {
+    return false;
+  }
+
+  return (
+    source.includes("showcaptcha") ||
+    source.includes("form-fb-hint") ||
+    source.includes("проверка, что запросы отправляет человек") ||
+    source.includes("подтвердите, что вы не робот") ||
+    source.includes("captcha")
+  );
+}
+
+function isYandexBlockedResponse(response) {
+  const finalUrl = String(response?.finalUrl || response?.url || "").toLowerCase();
+  const body = String(response?.body || "");
+  return (
+    finalUrl.includes("/showcaptcha") ||
+    isYandexRegionBlockedHtml(body) ||
+    isYandexCaptchaHtml(body)
+  );
+}
+
 async function isYandexPlaylistRegionBlocked(info, originalUrl) {
   const uuidKey = String(info?.playlistUuid || "").toLowerCase();
   const cacheKey = uuidKey || String(originalUrl || "").trim().toLowerCase();
@@ -1584,7 +1609,7 @@ async function isYandexPlaylistRegionBlocked(info, originalUrl) {
     },
   }).catch(() => null);
 
-  const blocked = Boolean(response && response.statusCode >= 200 && response.statusCode < 300 && isYandexRegionBlockedHtml(response.body));
+  const blocked = Boolean(response && response.statusCode >= 200 && response.statusCode < 300 && isYandexBlockedResponse(response));
   yandexRegionCheckCache.set(cacheKey, { blocked, checkedAt: Date.now() });
   return blocked;
 }
@@ -1624,7 +1649,7 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     return null;
   }
 
-  if (isYandexRegionBlockedHtml(response.body)) {
+  if (isYandexBlockedResponse(response)) {
     return { blocked: true };
   }
 
