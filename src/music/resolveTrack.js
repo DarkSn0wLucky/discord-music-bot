@@ -1945,15 +1945,23 @@ async function resolveYandexUrl(url, requestedBy) {
     return null;
   }
 
+  const hasYandexCookies = Boolean(resolveExistingFilePath(YANDEX_COOKIES_PATH));
+
   if (info.playlistKind || info.playlistUuid) {
     const regionBlocked = await isYandexPlaylistRegionBlocked(info, url);
     if (regionBlocked) {
-      throw new Error("Яндекс Музыка недоступна на сервере по региону. Плейлист прочитать нельзя.");
+      if (hasYandexCookies) {
+        throw new Error("Яндекс Музыка вернула антибот/капчу. Обнови YANDEX cookies и повтори.");
+      }
+      throw new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
     }
 
     const target = await resolveYandexPlaylistTarget(info, url);
     if (target?.blocked) {
-      throw new Error("Яндекс Музыка недоступна на сервере по региону. Плейлист прочитать нельзя.");
+      if (hasYandexCookies) {
+        throw new Error("Яндекс Музыка вернула антибот/капчу. Обнови YANDEX cookies и повтори.");
+      }
+      throw new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
     }
 
     if (!target?.owner || !target?.kind) {
