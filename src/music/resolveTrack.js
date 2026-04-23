@@ -2293,10 +2293,10 @@ async function resolveYandexUrl(url, requestedBy) {
 
         const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy, {
           strictMatch: false,
-          allowSyntheticFallback: true,
-          allowYtdlpFallback: false,
-          disableSecondaryMetadataLookup: true,
-          resolveBudgetMs: 45_000,
+          allowSyntheticFallback: false,
+          allowYtdlpFallback: true,
+          disableSecondaryMetadataLookup: false,
+          resolveBudgetMs: 120_000,
         });
         if (resolvedTracks.length > 0) {
           return {
