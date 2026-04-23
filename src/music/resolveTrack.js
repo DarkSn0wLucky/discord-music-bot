@@ -235,6 +235,84 @@ function limitItems(list, limit) {
   return items.slice(0, Math.floor(limit));
 }
 
+function safeDecodeURIComponent(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeYandexTargetPart(value) {
+  return safeDecodeURIComponent(value)
+    .replace(/\+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseYandexOwnerKindPair(ownerRaw, kindRaw) {
+  const owner = normalizeYandexTargetPart(ownerRaw);
+  const kindRawValue = normalizeYandexTargetPart(kindRaw);
+  const kind = kindRawValue.split(",")[0].trim();
+  if (!owner || !kind) {
+    return null;
+  }
+
+  return { owner, kind };
+}
+
+function isNumericIdentifier(value) {
+  return /^\d+$/u.test(String(value || "").trim());
+}
+
+function isCanonicalYandexPlaylistTarget(target) {
+  return Boolean(target && isNumericIdentifier(target.owner) && isNumericIdentifier(target.kind));
+}
+
+function parseJsonPayload(text) {
+  const rawText = String(text || "").trim();
+  if (!rawText) {
+    return null;
+  }
+
+  const normalized = rawText.replace(/^\)\]\}'\s*/u, "");
+  if (!normalized || (normalized[0] !== "{" && normalized[0] !== "[")) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(normalized);
+  } catch {
+    return null;
+  }
+}
+
+function pickPreferredYandexPlaylistTarget(...targets) {
+  const flattened = targets.flat().filter(Boolean);
+  const canonical = flattened.find((target) => isCanonicalYandexPlaylistTarget(target));
+  return canonical || flattened[0] || null;
+}
+
+function extractYandexPlaylistFromPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  return (
+    payload.playlist ||
+    payload.result?.playlist ||
+    payload.data?.playlist ||
+    payload.pageData?.playlist ||
+    (Array.isArray(payload.playlists) ? payload.playlists[0] : null) ||
+    null
+  );
+}
+
 function parseYandexPlaylistHints(raw) {
   const map = new Map();
   const value = String(raw || "").trim();
@@ -248,17 +326,24 @@ function parseYandexPlaylistHints(raw) {
     .filter(Boolean);
 
   for (const entry of entries) {
-    const [uuidPart, targetPart] = entry.split("=").map((part) => String(part || "").trim());
-    if (!uuidPart || !targetPart) {
+    const eqIndex = entry.indexOf("=");
+    if (eqIndex <= 0 || eqIndex >= entry.length - 1) {
       continue;
     }
 
-    const [owner, kind] = targetPart.split(":").map((part) => String(part || "").trim());
-    if (!owner || !kind) {
+    const uuidPart = normalizeYandexTargetPart(entry.slice(0, eqIndex));
+    const targetPart = normalizeYandexTargetPart(entry.slice(eqIndex + 1));
+    const targetSep = targetPart.indexOf(":");
+    if (!uuidPart || targetSep <= 0 || targetSep >= targetPart.length - 1) {
       continue;
     }
 
-    map.set(uuidPart.toLowerCase(), { owner, kind });
+    const target = parseYandexOwnerKindPair(targetPart.slice(0, targetSep), targetPart.slice(targetSep + 1));
+    if (!target) {
+      continue;
+    }
+
+    map.set(uuidPart.toLowerCase(), target);
   }
 
   return map;
@@ -539,6 +624,16 @@ function parseYandexUrlInfo(url) {
     }
 
     const pathName = parsed.pathname || "";
+    const queryTarget =
+      parseYandexOwnerKindPair(
+        parsed.searchParams.get("owner") ||
+          parsed.searchParams.get("uid") ||
+          parsed.searchParams.get("playlistOwner"),
+        parsed.searchParams.get("kinds") ||
+          parsed.searchParams.get("kind") ||
+          parsed.searchParams.get("playlistKind")
+      ) || null;
+
     const trackInAlbum = pathName.match(/\/album\/(\d+)\/track\/(\d+)/i);
     if (trackInAlbum) {
       return {
@@ -577,12 +672,14 @@ function parseYandexUrlInfo(url) {
 
     const userPlaylist = pathName.match(/\/users\/([^/]+)\/playlists\/([^/?#]+)/i);
     if (userPlaylist) {
+      const userTarget =
+        parseYandexOwnerKindPair(userPlaylist[1] || "", userPlaylist[2] || "") || queryTarget;
       return {
         origin: parsed.origin,
         albumId: "",
         trackId: "",
-        playlistOwner: decodeURIComponent(userPlaylist[1] || ""),
-        playlistKind: decodeURIComponent(userPlaylist[2] || ""),
+        playlistOwner: userTarget?.owner || "",
+        playlistKind: userTarget?.kind || "",
         playlistUuid: "",
       };
     }
@@ -593,9 +690,9 @@ function parseYandexUrlInfo(url) {
         origin: parsed.origin,
         albumId: "",
         trackId: "",
-        playlistOwner: "",
-        playlistKind: "",
-        playlistUuid: decodeURIComponent(directPlaylist[1] || ""),
+        playlistOwner: queryTarget?.owner || "",
+        playlistKind: queryTarget?.kind || "",
+        playlistUuid: normalizeYandexTargetPart(directPlaylist[1] || ""),
       };
     }
 
@@ -603,8 +700,8 @@ function parseYandexUrlInfo(url) {
       origin: parsed.origin,
       albumId: "",
       trackId: "",
-      playlistOwner: "",
-      playlistKind: "",
+      playlistOwner: queryTarget?.owner || "",
+      playlistKind: queryTarget?.kind || "",
       playlistUuid: "",
     };
   } catch {
@@ -1477,6 +1574,12 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
   const allowSyntheticFallback = options.allowSyntheticFallback === true;
   const strictMatch = options.strictMatch !== false;
   const allowYtdlpFallback = options.allowYtdlpFallback !== false;
+  const disableSecondaryMetadataLookup = options.disableSecondaryMetadataLookup === true;
+  const resolveBudgetMsRaw = Number(options.resolveBudgetMs);
+  const resolveBudgetMs =
+    Number.isFinite(resolveBudgetMsRaw) && resolveBudgetMsRaw > 0
+      ? Math.round(resolveBudgetMsRaw)
+      : PLAYLIST_RESOLVE_BUDGET_MS;
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const results = new Array(sourceItems.length).fill(null);
@@ -1489,7 +1592,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
 
   async function worker() {
     while (true) {
-      if (Date.now() - startedAt >= PLAYLIST_RESOLVE_BUDGET_MS) {
+      if (Date.now() - startedAt >= resolveBudgetMs) {
         return;
       }
 
@@ -1529,10 +1632,12 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
             allowYtdlpFallback,
             accept: acceptCandidate,
           }).catch(() => null)) ||
-          (await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
-            allowYtdlpFallback,
-            accept: acceptCandidate,
-          }).catch(() => null))
+          (disableSecondaryMetadataLookup
+            ? null
+            : await resolveTrackByMetadataQuery(primaryQuery, requestedBy, {
+                allowYtdlpFallback,
+                accept: acceptCandidate,
+              }).catch(() => null))
         );
       })();
 
@@ -1561,6 +1666,20 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
   }
 
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  if (allowSyntheticFallback) {
+    for (let index = 0; index < sourceItems.length; index += 1) {
+      if (results[index]) {
+        continue;
+      }
+
+      const fallbackTrack = buildMetadataFallbackTrack(sourceItems[index], requestedBy);
+      if (fallbackTrack) {
+        results[index] = fallbackTrack;
+      }
+    }
+  }
+
   return limitItems(results.filter(Boolean), MAX_PLAYLIST_ITEMS);
 }
 
@@ -1829,30 +1948,35 @@ function parseYandexPlaylistTargetFromHtml(html) {
     return null;
   }
 
-  const directMatch = source.match(/"uid"\s*:\s*(\d+)\s*,\s*"kind"\s*:\s*(\d+)\s*,\s*"title"\s*:/i);
+  const directMatch = source.match(/"uid"\s*:\s*"?(\d+)"?\s*,\s*"kind"\s*:\s*"?(\d+)"?\s*,\s*"title"\s*:/i);
   if (directMatch) {
-    return {
-      owner: directMatch[1],
-      kind: directMatch[2],
-    };
+    return parseYandexOwnerKindPair(directMatch[1], directMatch[2]);
   }
 
-  const reverseMatch = source.match(/"kind"\s*:\s*(\d+)\s*,[\s\S]{0,1200}?"uid"\s*:\s*(\d+)/i);
+  const reverseMatch = source.match(/"kind"\s*:\s*"?(\d+)"?\s*,[\s\S]{0,1600}?"uid"\s*:\s*"?(\d+)"?/i);
   if (reverseMatch) {
-    return {
-      owner: reverseMatch[2],
-      kind: reverseMatch[1],
-    };
+    return parseYandexOwnerKindPair(reverseMatch[2], reverseMatch[1]);
   }
 
   const metaMatch = source.match(
-    /"meta"\s*:\s*\{[\s\S]{0,1200}?"uid"\s*:\s*(\d+)\s*,\s*"kind"\s*:\s*(\d+)[\s\S]{0,1200}?\}/i
+    /"meta"\s*:\s*\{[\s\S]{0,1600}?"uid"\s*:\s*"?(\d+)"?\s*,\s*"kind"\s*:\s*"?(\d+)"?[\s\S]{0,1600}?\}/i
   );
   if (metaMatch) {
-    return {
-      owner: metaMatch[1],
-      kind: metaMatch[2],
-    };
+    return parseYandexOwnerKindPair(metaMatch[1], metaMatch[2]);
+  }
+
+  const ownerBlockMatch = source.match(
+    /"owner"\s*:\s*\{[\s\S]{0,500}?"uid"\s*:\s*"?(\d+)"?[\s\S]{0,500}?\}[\s\S]{0,600}?"kind"\s*:\s*"?(\d+)"?/i
+  );
+  if (ownerBlockMatch) {
+    return parseYandexOwnerKindPair(ownerBlockMatch[1], ownerBlockMatch[2]);
+  }
+
+  const playlistBlockMatch = source.match(
+    /"playlist"\s*:\s*\{[\s\S]{0,1200}?"kind"\s*:\s*"?(\d+)"?[\s\S]{0,1200}?"uid"\s*:\s*"?(\d+)"?[\s\S]{0,1200}?\}/i
+  );
+  if (playlistBlockMatch) {
+    return parseYandexOwnerKindPair(playlistBlockMatch[2], playlistBlockMatch[1]);
   }
 
   return null;
@@ -1930,23 +2054,20 @@ async function isYandexPlaylistRegionBlocked(info, originalUrl) {
 }
 
 async function resolveYandexPlaylistTarget(info, originalUrl) {
-  if (info.playlistOwner && info.playlistKind) {
-    return {
-      owner: info.playlistOwner,
-      kind: info.playlistKind,
-    };
+  const directTarget = parseYandexOwnerKindPair(info?.playlistOwner, info?.playlistKind);
+  if (isCanonicalYandexPlaylistTarget(directTarget)) {
+    return directTarget;
   }
 
-  if (!info.playlistUuid) {
-    return null;
+  const hintRaw = yandexPlaylistHintMap.get(String(info?.playlistUuid || "").toLowerCase());
+  const hintTarget = parseYandexOwnerKindPair(hintRaw?.owner, hintRaw?.kind);
+  if (isCanonicalYandexPlaylistTarget(hintTarget)) {
+    return hintTarget;
   }
 
-  const hint = yandexPlaylistHintMap.get(String(info.playlistUuid || "").toLowerCase());
-  if (hint?.owner && hint?.kind) {
-    return {
-      owner: hint.owner,
-      kind: hint.kind,
-    };
+  const shouldProbeHtml = Boolean(originalUrl && (info?.playlistUuid || directTarget || hintTarget));
+  if (!shouldProbeHtml) {
+    return hintTarget || directTarget || null;
   }
 
   const response =
@@ -1982,36 +2103,94 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     });
   }
 
-  return resolvedTarget;
+  return resolvedTarget || hintTarget || directTarget || null;
+}
+
+async function fetchYandexJsonWithBlockCheck(url) {
+  const cookiePath = getCookiePathForUrl(url);
+  const cookieHeader = buildCookieHeaderForUrl(url, cookiePath || "");
+
+  const curlJson = await fetchJsonViaCurl(url, {
+    cookiesPath: cookiePath || "",
+  }).catch(() => null);
+  if (curlJson) {
+    return { blocked: false, data: curlJson };
+  }
+
+  const response = await requestTextWithRedirect(url, {
+    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    cookiesPath: cookiePath || "",
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "application/json,text/plain,*/*",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://music.yandex.ru/",
+      ...(cookieHeader ? { cookie: cookieHeader } : {}),
+    },
+  }).catch(() => null);
+
+  if (!response) {
+    return { blocked: false, data: null };
+  }
+
+  if (isYandexBlockedResponse(response)) {
+    return { blocked: true, data: null };
+  }
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    return { blocked: false, data: null };
+  }
+
+  return {
+    blocked: false,
+    data: parseJsonPayload(response.body),
+  };
+}
+
+function buildYandexAntiBotError(hasYandexCookies) {
+  return hasYandexCookies
+    ? new Error("Яндекс Музыка вернула антибот/капчу. Обнови YANDEX cookies и повтори.")
+    : new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
 }
 
 async function fetchYandexPlaylistData(origin, owner, kind) {
-  const playlistUrl = new URL("/handlers/playlist.jsx", origin);
-  playlistUrl.searchParams.set("owner", String(owner));
-  playlistUrl.searchParams.set("kinds", String(kind));
-  playlistUrl.searchParams.set("overembed", "false");
-
-  let playlistData = await fetchJsonWithTimeout(playlistUrl.toString());
-  if (playlistData?.playlist) {
-    return playlistData;
-  }
-
-  playlistUrl.searchParams.delete("overembed");
-  playlistUrl.searchParams.set("lang", "ru");
-  playlistData = await fetchJsonWithTimeout(playlistUrl.toString());
-  if (playlistData?.playlist) {
-    return playlistData;
-  }
-
   const canonicalOrigin = "https://music.yandex.ru";
-  if (String(origin || "").toLowerCase() !== canonicalOrigin) {
-    const fallbackUrl = new URL("/handlers/playlist.jsx", canonicalOrigin);
-    fallbackUrl.searchParams.set("owner", String(owner));
-    fallbackUrl.searchParams.set("kinds", String(kind));
-    fallbackUrl.searchParams.set("lang", "ru");
-    playlistData = await fetchJsonWithTimeout(fallbackUrl.toString());
-    if (playlistData?.playlist) {
-      return playlistData;
+  const normalizedOrigin = String(origin || "").trim();
+  const candidateOrigins = [canonicalOrigin];
+  if (normalizedOrigin && normalizedOrigin.toLowerCase() !== canonicalOrigin) {
+    candidateOrigins.push(normalizedOrigin);
+  }
+
+  const requestVariants = [
+    { overembed: "false" },
+    { lang: "ru" },
+  ];
+
+  const attemptedUrls = new Set();
+  for (const currentOrigin of candidateOrigins) {
+    for (const variant of requestVariants) {
+      const playlistUrl = new URL("/handlers/playlist.jsx", currentOrigin);
+      playlistUrl.searchParams.set("owner", String(owner));
+      playlistUrl.searchParams.set("kinds", String(kind));
+      Object.entries(variant).forEach(([key, value]) => {
+        playlistUrl.searchParams.set(key, String(value));
+      });
+
+      const url = playlistUrl.toString();
+      if (attemptedUrls.has(url)) {
+        continue;
+      }
+      attemptedUrls.add(url);
+
+      const attempt = await fetchYandexJsonWithBlockCheck(url);
+      if (attempt?.blocked) {
+        return { blocked: true };
+      }
+
+      if (attempt?.data?.playlist) {
+        return attempt.data;
+      }
     }
   }
 
@@ -2025,22 +2204,12 @@ async function resolveYandexUrl(url, requestedBy) {
   }
 
   const hasYandexCookies = Boolean(resolveExistingFilePath(YANDEX_COOKIES_PATH));
+  let playlistMappingFailed = false;
 
   if (info.playlistKind || info.playlistUuid) {
-    const regionBlocked = await isYandexPlaylistRegionBlocked(info, url);
-    if (regionBlocked) {
-      if (hasYandexCookies) {
-        throw new Error("Яндекс Музыка вернула антибот/капчу. Обнови YANDEX cookies и повтори.");
-      }
-      throw new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
-    }
-
     const target = await resolveYandexPlaylistTarget(info, url);
     if (target?.blocked) {
-      if (hasYandexCookies) {
-        throw new Error("Яндекс Музыка вернула антибот/капчу. Обнови YANDEX cookies и повтори.");
-      }
-      throw new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
+      throw buildYandexAntiBotError(hasYandexCookies);
     }
 
     if (!target?.owner || !target?.kind) {
@@ -2048,13 +2217,17 @@ async function resolveYandexUrl(url, requestedBy) {
     }
 
     const playlistData = await fetchYandexPlaylistData(info.origin, target.owner, target.kind);
+    if (playlistData?.blocked) {
+      throw buildYandexAntiBotError(hasYandexCookies);
+    }
+
     const playlist = playlistData?.playlist;
     const rawTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
     if (rawTracks.length === 0) {
       throw new Error("Плейлист Яндекс Музыки пуст или недоступен для чтения.");
     }
 
-    const metadata = rawTracks.map((item) => {
+    const metadata = limitItems(rawTracks, MAX_PLAYLIST_ITEMS).map((item) => {
       const track = item?.track || item || {};
       const durationMs = Number(track?.durationMs) || 0;
       return {
@@ -2065,7 +2238,13 @@ async function resolveYandexUrl(url, requestedBy) {
       };
     });
 
-    const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
+    const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy, {
+      strictMatch: false,
+      allowSyntheticFallback: true,
+      allowYtdlpFallback: false,
+      disableSecondaryMetadataLookup: true,
+      resolveBudgetMs: 45_000,
+    });
     if (resolvedTracks.length > 0) {
       return {
         tracks: resolvedTracks,
@@ -2074,7 +2253,7 @@ async function resolveYandexUrl(url, requestedBy) {
       };
     }
 
-    throw new Error("Не удалось сопоставить треки плейлиста Яндекс Музыки с YouTube.");
+    playlistMappingFailed = true;
   }
 
   if (info.trackId) {
@@ -2184,6 +2363,10 @@ async function resolveYandexUrl(url, requestedBy) {
   });
   if (ytdlpFallback) {
     return ytdlpFallback;
+  }
+
+  if (playlistMappingFailed) {
+    throw new Error("Не удалось сопоставить треки плейлиста Яндекс Музыки с YouTube.");
   }
 
   return null;
