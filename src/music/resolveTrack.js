@@ -34,6 +34,10 @@ const METADATA_ITEM_RESOLVE_TIMEOUT_MS = 12_000;
 const METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS = 4_000;
 const PLAYLIST_RESOLVE_BUDGET_MS = 90_000;
 const PLAYLIST_FAST_MODE_THRESHOLD = 40;
+const YANDEX_PLAYLIST_TOTAL_BUDGET_MS = 84_000;
+const YANDEX_PLAYLIST_FETCH_BUDGET_MS = 24_000;
+const YANDEX_PLAYLIST_FETCH_TIMEOUT_MAX_MS = 8_000;
+const YANDEX_PLAYLIST_FETCH_TIMEOUT_MIN_MS = 2_500;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const YANDEX_REGION_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const COOKIES_FILE_CACHE_TTL_MS = 30 * 1000;
@@ -1186,14 +1190,19 @@ function isStrictMetadataMatch(candidate, metadataItem, primaryQuery = "") {
     return false;
   }
 
-  const combinedCandidateText = `${candidate.author || ""} ${candidate.title || ""}`;
-  if (primaryQuery && !hasQueryTokenCoverage(combinedCandidateText, primaryQuery)) {
-    return false;
-  }
-
   const candidateTitleTokens = toMeaningfulTokens(candidate.title);
   const candidateAuthorTokens = toMeaningfulTokens(candidate.author);
   const candidateAllTokens = [...new Set([...candidateAuthorTokens, ...candidateTitleTokens])];
+
+  if (primaryQuery) {
+    const queryTokens = toMeaningfulTokens(primaryQuery);
+    if (queryTokens.length > 0) {
+      const queryCoverage = tokenCoverageRatio(queryTokens, candidateAllTokens);
+      if (queryCoverage < strictCoverageThreshold(queryTokens.length)) {
+        return false;
+      }
+    }
+  }
 
   const titleTokens = toMeaningfulTokens(normalizedItem.title);
   if (titleTokens.length > 0) {
@@ -1201,7 +1210,7 @@ function isStrictMetadataMatch(candidate, metadataItem, primaryQuery = "") {
       titleTokens,
       candidateTitleTokens.length > 0 ? candidateTitleTokens : candidateAllTokens
     );
-    const titleThreshold = titleTokens.length <= 2 ? 1 : 0.8;
+    const titleThreshold = titleTokens.length <= 1 ? 1 : titleTokens.length === 2 ? 0.75 : 0.7;
     if (titleCoverage < titleThreshold) {
       return false;
     }
@@ -1210,7 +1219,10 @@ function isStrictMetadataMatch(candidate, metadataItem, primaryQuery = "") {
   const artistTokens = toMeaningfulTokens(normalizedItem.artist);
   if (artistTokens.length > 0) {
     const artistCoverage = tokenCoverageRatio(artistTokens, candidateAllTokens);
-    const artistThreshold = artistTokens.length === 1 ? 1 : 0.75;
+    const allArtistTokensShort = artistTokens.every((token) => token.length <= 3);
+    const artistThreshold = artistTokens.length === 1
+      ? (artistTokens[0]?.length <= 3 ? 0.4 : 0.8)
+      : (allArtistTokensShort ? 0.4 : 0.6);
     if (artistCoverage < artistThreshold) {
       return false;
     }
@@ -1472,12 +1484,20 @@ async function resolveTrackByMetadataQuery(query, requestedBy, options = {}) {
     allowYtdlpFallback,
   }).catch(() => []);
 
-  const packed = packSearchTracks(candidates, normalizedQuery);
+  const acceptedCandidates = candidates.filter((candidate) => {
+    try {
+      return accept(candidate, normalizedQuery);
+    } catch {
+      return false;
+    }
+  });
+
+  const packed = packSearchTracks(acceptedCandidates, normalizedQuery);
   if (!packed) {
     return null;
   }
 
-  return accept(packed, normalizedQuery) ? packed : null;
+  return packed;
 }
 
 async function resolveTrackByQueryVariants(queries, requestedBy, options = {}) {
@@ -1622,7 +1642,9 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
 async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) {
   const sourceItems = limitItems(items, MAX_PLAYLIST_ITEMS);
   if (!sourceItems.length) {
-    return [];
+    return options.returnDetailed === true
+      ? { tracksByIndex: [], matchedCount: 0, missedIndices: [], timedOutCount: 0 }
+      : [];
   }
 
   const allowSyntheticFallback = options.allowSyntheticFallback === true;
@@ -1635,6 +1657,8 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
       ? Math.round(resolveBudgetMsRaw)
       : PLAYLIST_RESOLVE_BUDGET_MS;
   const itemResolveTimeoutMsRaw = Number(options.itemResolveTimeoutMs);
+  const maxConcurrencyRaw = Number(options.maxConcurrency);
+  const queryLimitRaw = Number(options.queryLimit);
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
   const itemResolveTimeoutMs =
@@ -1646,10 +1670,20 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
   const results = new Array(sourceItems.length).fill(null);
   const querySettledCache = new Map();
   const queryInflight = new Map();
+  const returnDetailed = options.returnDetailed === true;
+  let timedOutCount = 0;
   let cursor = 0;
+  const maxConcurrency = Number.isFinite(maxConcurrencyRaw) && maxConcurrencyRaw > 0
+    ? Math.round(maxConcurrencyRaw)
+    : fastMode
+      ? METADATA_RESOLVE_CONCURRENCY_FAST
+      : METADATA_RESOLVE_CONCURRENCY;
+  const queryLimit = Number.isFinite(queryLimitRaw) && queryLimitRaw > 0
+    ? Math.round(queryLimitRaw)
+    : Number.POSITIVE_INFINITY;
   const workerCount = Math.max(
     1,
-    Math.min(fastMode ? METADATA_RESOLVE_CONCURRENCY_FAST : METADATA_RESOLVE_CONCURRENCY, sourceItems.length)
+    Math.min(maxConcurrency, sourceItems.length)
   );
 
   async function worker() {
@@ -1670,7 +1704,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
         continue;
       }
 
-      const queries = buildMetadataQueries(normalizedItem);
+      const queries = buildMetadataQueries(normalizedItem).slice(0, queryLimit);
       if (!queries.length) {
         const fallbackTrack = allowSyntheticFallback ? buildMetadataFallbackTrack(item, requestedBy) : null;
         if (fallbackTrack) {
@@ -1680,8 +1714,25 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
       }
 
       const primaryQuery = queries[0];
-      const acceptCandidate = (candidate) =>
-        !strictMatch || isStrictMetadataMatch(candidate, normalizedItem, primaryQuery);
+      const normalizedTitleOnlyQuery = normalizeText(normalizedItem.title || "");
+      const acceptCandidate = (candidate, candidateQuery = primaryQuery) => {
+        if (!strictMatch) {
+          return true;
+        }
+
+        const effectiveQuery = String(candidateQuery || primaryQuery || "").trim();
+        const normalizedEffectiveQuery = normalizeText(effectiveQuery);
+        const isTitleLedQuery =
+          Boolean(normalizedTitleOnlyQuery) &&
+          (normalizedEffectiveQuery === normalizedTitleOnlyQuery ||
+            normalizedEffectiveQuery.startsWith(`${normalizedTitleOnlyQuery} `) ||
+            normalizedEffectiveQuery.endsWith(` ${normalizedTitleOnlyQuery}`));
+
+        const itemForCheck = isTitleLedQuery
+          ? { ...normalizedItem, artist: "" }
+          : normalizedItem;
+        return isStrictMetadataMatch(candidate, itemForCheck, effectiveQuery || primaryQuery);
+      };
       const cacheKey = queries.join("||");
       if (querySettledCache.has(cacheKey)) {
         const cachedTrack = querySettledCache.get(cacheKey);
@@ -1727,15 +1778,20 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
         queryInflight.set(cacheKey, resolvePromise);
       }
 
-      const resolvedTrack = await Promise.race([
+      const timedOutMarker = Symbol("metadata_timeout");
+      const resolvedOrTimeout = await Promise.race([
         resolvePromise,
         new Promise((resolve) =>
           setTimeout(
-            () => resolve(null),
+            () => resolve(timedOutMarker),
             itemResolveTimeoutMs
           )
         ),
       ]);
+      const resolvedTrack = resolvedOrTimeout === timedOutMarker ? null : resolvedOrTimeout;
+      if (resolvedOrTimeout === timedOutMarker) {
+        timedOutCount += 1;
+      }
 
       if (resolvedTrack) {
         results[index] = resolvedTrack;
@@ -1769,6 +1825,23 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
         results[index] = fallbackTrack;
       }
     }
+  }
+
+  if (returnDetailed) {
+    const matchedCount = results.filter(Boolean).length;
+    const missedIndices = [];
+    for (let index = 0; index < results.length; index += 1) {
+      if (!results[index]) {
+        missedIndices.push(index);
+      }
+    }
+
+    return {
+      tracksByIndex: results,
+      matchedCount,
+      missedIndices,
+      timedOutCount,
+    };
   }
 
   return limitItems(results.filter(Boolean), MAX_PLAYLIST_ITEMS);
@@ -2213,8 +2286,10 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
   return preferredTarget;
 }
 
-async function fetchYandexJsonWithBlockCheck(url) {
-  const yandexTimeoutMs = 20_000;
+async function fetchYandexJsonWithBlockCheck(url, options = {}) {
+  const timeoutMsRaw = Number(options.timeoutMs);
+  const yandexTimeoutMs =
+    Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.round(timeoutMsRaw) : 20_000;
   const yandexMaxBuffer = 20 * 1024 * 1024;
   const cookiePath = getCookiePathForUrl(url);
   const cookieHeader = buildCookieHeaderForUrl(url, cookiePath || "");
@@ -2265,13 +2340,19 @@ function buildYandexAntiBotError(hasYandexCookies) {
     : new Error("Яндекс Музыка вернула антибот/капчу. Нужен YANDEX_COOKIES_PATH (cookies из браузера music.yandex.ru).");
 }
 
-async function fetchYandexPlaylistData(origin, owner, kind) {
+async function fetchYandexPlaylistData(origin, owner, kind, options = {}) {
   const canonicalOrigin = "https://music.yandex.ru";
   const normalizedOrigin = String(origin || "").trim();
   const candidateOrigins = [canonicalOrigin];
   if (normalizedOrigin && normalizedOrigin.toLowerCase() !== canonicalOrigin) {
     candidateOrigins.push(normalizedOrigin);
   }
+  const maxBudgetMsRaw = Number(options.maxBudgetMs);
+  const maxBudgetMs =
+    Number.isFinite(maxBudgetMsRaw) && maxBudgetMsRaw > 0
+      ? Math.round(maxBudgetMsRaw)
+      : YANDEX_PLAYLIST_FETCH_BUDGET_MS;
+  const startedAt = Date.now();
 
   const requestVariants = [
     { overembed: "false", lang: "ru" },
@@ -2296,7 +2377,20 @@ async function fetchYandexPlaylistData(origin, owner, kind) {
       }
       attemptedUrls.add(url);
 
-      const attempt = await fetchYandexJsonWithBlockCheck(url);
+      const elapsedMs = Date.now() - startedAt;
+      const budgetLeftMs = maxBudgetMs - elapsedMs;
+      if (budgetLeftMs <= YANDEX_PLAYLIST_FETCH_TIMEOUT_MIN_MS) {
+        return null;
+      }
+
+      const attemptTimeoutMs = Math.max(
+        YANDEX_PLAYLIST_FETCH_TIMEOUT_MIN_MS,
+        Math.min(YANDEX_PLAYLIST_FETCH_TIMEOUT_MAX_MS, budgetLeftMs - 250)
+      );
+
+      const attempt = await fetchYandexJsonWithBlockCheck(url, {
+        timeoutMs: attemptTimeoutMs,
+      });
       if (attempt?.blocked) {
         return { blocked: true };
       }
@@ -2321,13 +2415,16 @@ async function resolveYandexUrl(url, requestedBy) {
   let playlistMappingFailed = false;
 
   if (info.playlistKind || info.playlistUuid) {
+    const playlistResolveStartedAt = Date.now();
     const target = await resolveYandexPlaylistTarget(info, url);
     if (target?.blocked) {
       throw buildYandexAntiBotError(hasYandexCookies);
     }
 
     if (target?.owner && target?.kind) {
-      const playlistData = await fetchYandexPlaylistData(info.origin, target.owner, target.kind);
+      const playlistData = await fetchYandexPlaylistData(info.origin, target.owner, target.kind, {
+        maxBudgetMs: YANDEX_PLAYLIST_FETCH_BUDGET_MS,
+      });
       if (playlistData?.blocked) {
         throw buildYandexAntiBotError(hasYandexCookies);
       }
@@ -2335,32 +2432,85 @@ async function resolveYandexUrl(url, requestedBy) {
       const playlist = playlistData?.playlist;
       const rawTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
       if (rawTracks.length > 0) {
-        const metadata = limitItems(rawTracks, MAX_PLAYLIST_ITEMS).map((item) => {
-          const track = item?.track || item || {};
-          const durationMs = Number(track?.durationMs) || 0;
-          return {
-            title: track?.title || "",
-            artist: joinArtists(track?.artists),
-            durationMs: durationMs > 0 ? durationMs : 0,
-            durationSec: durationMs > 0 ? Math.round(durationMs / 1000) : 0,
-          };
-        });
+        const metadata = limitItems(rawTracks, MAX_PLAYLIST_ITEMS)
+          .map((item) => {
+            const track = item?.track || item || {};
+            const durationMs = Number(track?.durationMs) || 0;
+            return {
+              title: track?.title || "",
+              artist: joinArtists(track?.artists),
+              durationMs: durationMs > 0 ? durationMs : 0,
+              durationSec: durationMs > 0 ? Math.round(durationMs / 1000) : 0,
+            };
+          })
+          .filter((item) => String(item?.title || "").trim());
 
-        const searchFallbackTracks = metadata
-          .map((item) =>
-            buildMetadataFallbackTrack(
-              item,
-              requestedBy,
-              buildQueryFromArtistTitle(item?.artist || "", item?.title || "")
-            )
-          )
-          .filter(Boolean);
-        if (searchFallbackTracks.length > 0) {
-          return {
-            tracks: searchFallbackTracks,
-            kind: "yandex_playlist",
-            title: playlist?.title || "Yandex playlist",
-          };
+        const elapsedBeforeMatchMs = Date.now() - playlistResolveStartedAt;
+        const budgetLeftForMatchMs = YANDEX_PLAYLIST_TOTAL_BUDGET_MS - elapsedBeforeMatchMs;
+        if (budgetLeftForMatchMs <= 3_500) {
+          playlistMappingFailed = true;
+        } else {
+          const perItemTimeoutMs =
+            metadata.length >= 150 ? 5_000 : metadata.length >= 90 ? 4_500 : 4_000;
+          const firstPassBudgetMs = Math.max(
+            3_000,
+            Math.min(PLAYLIST_RESOLVE_BUDGET_MS, budgetLeftForMatchMs - 500)
+          );
+          const firstPass = await resolveTracksFromMetadataItems(metadata, requestedBy, {
+            strictMatch: true,
+            allowSyntheticFallback: false,
+            allowYtdlpFallback: true,
+            disableSecondaryMetadataLookup: metadata.length >= PLAYLIST_FAST_MODE_THRESHOLD,
+            resolveBudgetMs: firstPassBudgetMs,
+            itemResolveTimeoutMs: perItemTimeoutMs,
+            maxConcurrency: metadata.length >= 120 ? 8 : 6,
+            queryLimit: metadata.length >= 120 ? 2 : 3,
+            returnDetailed: true,
+          });
+
+          let tracksByIndex = Array.isArray(firstPass?.tracksByIndex)
+            ? [...firstPass.tracksByIndex]
+            : new Array(metadata.length).fill(null);
+
+          const firstPassMissed = Array.isArray(firstPass?.missedIndices) ? firstPass.missedIndices : [];
+          const elapsedAfterFirstPassMs = Date.now() - playlistResolveStartedAt;
+          const budgetLeftAfterFirstPassMs = YANDEX_PLAYLIST_TOTAL_BUDGET_MS - elapsedAfterFirstPassMs;
+
+          if (firstPassMissed.length > 0 && budgetLeftAfterFirstPassMs > 4_000) {
+            const missedMetadata = firstPassMissed.map((index) => metadata[index]).filter(Boolean);
+            const secondPass = await resolveTracksFromMetadataItems(missedMetadata, requestedBy, {
+              strictMatch: true,
+              allowSyntheticFallback: false,
+              allowYtdlpFallback: true,
+              disableSecondaryMetadataLookup: false,
+              resolveBudgetMs: Math.min(30_000, Math.max(4_000, budgetLeftAfterFirstPassMs - 500)),
+              itemResolveTimeoutMs: Math.min(6_500, perItemTimeoutMs + 1_500),
+              maxConcurrency: 4,
+              queryLimit: 4,
+              returnDetailed: true,
+            });
+
+            if (Array.isArray(secondPass?.tracksByIndex)) {
+              secondPass.tracksByIndex.forEach((track, missedIndex) => {
+                if (!track) {
+                  return;
+                }
+                const originalIndex = firstPassMissed[missedIndex];
+                if (Number.isInteger(originalIndex) && originalIndex >= 0 && originalIndex < tracksByIndex.length) {
+                  tracksByIndex[originalIndex] = track;
+                }
+              });
+            }
+          }
+
+          const resolvedTracks = limitItems(tracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+          if (resolvedTracks.length > 0) {
+            return {
+              tracks: resolvedTracks,
+              kind: "yandex_playlist",
+              title: playlist?.title || "Yandex playlist",
+            };
+          }
         }
       }
     }
