@@ -1,6 +1,7 @@
 ﻿const http = require("http");
 const https = require("https");
 const dns = require("dns");
+const os = require("os");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -41,9 +42,49 @@ const networkCheckCache = new Map();
 const yandexRegionCheckCache = new Map();
 const cookiesFileCache = new Map();
 const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
+let l2tpAddressChecked = false;
+let l2tpAddressAvailable = false;
+
+function hasLocalAddress(address) {
+  const target = String(address || "").trim();
+  if (!target) {
+    return false;
+  }
+
+  const networkInterfaces = os.networkInterfaces();
+  for (const entries of Object.values(networkInterfaces)) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (String(entry?.address || "").trim() === target) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function canUseConfiguredL2tpAddress() {
+  if (l2tpAddressChecked) {
+    return l2tpAddressAvailable;
+  }
+
+  l2tpAddressChecked = true;
+  l2tpAddressAvailable = hasLocalAddress(L2TP_SOURCE_IP);
+  if (!l2tpAddressAvailable && String(L2TP_SOURCE_IP || "").trim()) {
+    console.warn(
+      `[Resolve] L2TP_SOURCE_IP=${String(L2TP_SOURCE_IP).trim()} не найден на локальных интерфейсах; fallback на обычный маршрут.`
+    );
+  }
+
+  return l2tpAddressAvailable;
+}
 
 function isHomeL2tpEnabled() {
-  return Boolean(String(L2TP_SOURCE_IP || "").trim());
+  return Boolean(String(L2TP_SOURCE_IP || "").trim()) && canUseConfiguredL2tpAddress();
 }
 
 function shouldUseHomeL2tpForUrl(value) {
@@ -3278,5 +3319,6 @@ module.exports = {
   resolveTracks,
   resolveSearchCandidates,
 };
+
 
 
