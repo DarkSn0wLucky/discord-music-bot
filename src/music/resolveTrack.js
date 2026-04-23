@@ -1590,8 +1590,15 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
     Number.isFinite(resolveBudgetMsRaw) && resolveBudgetMsRaw > 0
       ? Math.round(resolveBudgetMsRaw)
       : PLAYLIST_RESOLVE_BUDGET_MS;
+  const itemResolveTimeoutMsRaw = Number(options.itemResolveTimeoutMs);
   const startedAt = Date.now();
   const fastMode = sourceItems.length >= PLAYLIST_FAST_MODE_THRESHOLD;
+  const itemResolveTimeoutMs =
+    Number.isFinite(itemResolveTimeoutMsRaw) && itemResolveTimeoutMsRaw > 0
+      ? Math.round(itemResolveTimeoutMsRaw)
+      : fastMode
+        ? METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS
+        : METADATA_ITEM_RESOLVE_TIMEOUT_MS;
   const results = new Array(sourceItems.length).fill(null);
   const querySettledCache = new Map();
   const queryInflight = new Map();
@@ -1681,7 +1688,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
         new Promise((resolve) =>
           setTimeout(
             () => resolve(null),
-            fastMode ? METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS : METADATA_ITEM_RESOLVE_TIMEOUT_MS
+            itemResolveTimeoutMs
           )
         ),
       ]);
@@ -2296,11 +2303,29 @@ async function resolveYandexUrl(url, requestedBy) {
           allowSyntheticFallback: false,
           allowYtdlpFallback: true,
           disableSecondaryMetadataLookup: false,
-          resolveBudgetMs: 120_000,
+          resolveBudgetMs: 90_000,
+          itemResolveTimeoutMs: 15_000,
         });
         if (resolvedTracks.length > 0) {
           return {
             tracks: resolvedTracks,
+            kind: "yandex_playlist",
+            title: playlist?.title || "Yandex playlist",
+          };
+        }
+
+        const searchFallbackTracks = metadata
+          .map((item) =>
+            buildMetadataFallbackTrack(
+              item,
+              requestedBy,
+              buildQueryFromArtistTitle(item?.artist || "", item?.title || "")
+            )
+          )
+          .filter(Boolean);
+        if (searchFallbackTracks.length > 0) {
+          return {
+            tracks: searchFallbackTracks,
             kind: "yandex_playlist",
             title: playlist?.title || "Yandex playlist",
           };
