@@ -25,6 +25,7 @@ const SEARCH_RESULTS_LIMIT = 8;
 const SEARCH_TRACK_PACK_SIZE = 5;
 const SEARCH_CANDIDATE_POOL_MULTIPLIER = 4;
 const API_RESOLVE_LIMIT = 12;
+const CANDIDATE_YTDLP_FALLBACK_CONCURRENCY = 2;
 const EXTERNAL_FETCH_TIMEOUT_MS = 8_000;
 const METADATA_RESOLVE_CONCURRENCY = 3;
 const METADATA_RESOLVE_CONCURRENCY_FAST = 5;
@@ -1387,20 +1388,29 @@ async function resolveCandidateVideosFromUrls(urls, requestedBy, maxCount = API_
     return resolved;
   }
 
-  const settled = await Promise.allSettled(unresolvedUrls.map((url) => resolveCandidateVideo(url, requestedBy)));
+  const queue = unresolvedUrls.slice();
+  const workerCount = Math.max(1, Math.min(CANDIDATE_YTDLP_FALLBACK_CONCURRENCY, queue.length));
 
-  settled.forEach((result, index) => {
-    const url = unresolvedUrls[index];
-    if (result.status === "fulfilled") {
-      const track = result.value;
-      if (track?.url && !resolvedUrls.has(track.url)) {
-        resolved.push(track);
-        resolvedUrls.add(track.url);
+  async function fallbackWorker() {
+    while (queue.length > 0) {
+      const url = queue.shift();
+      if (!url) {
+        continue;
       }
-    } else {
-      console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${result.reason?.message || "Unknown error"}`);
+
+      try {
+        const track = await resolveCandidateVideo(url, requestedBy);
+        if (track?.url && !resolvedUrls.has(track.url)) {
+          resolved.push(track);
+          resolvedUrls.add(track.url);
+        }
+      } catch (error) {
+        console.warn(`[Resolve] API-кандидат пропущен: ${url} | ${error?.message || "Unknown error"}`);
+      }
     }
-  });
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => fallbackWorker()));
 
   return resolved;
 }
@@ -1807,7 +1817,9 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
 
 function fetchJsonViaCurl(url, options = {}) {
   return new Promise((resolve) => {
-    const maxTimeSec = Math.max(4, Math.ceil(EXTERNAL_FETCH_TIMEOUT_MS / 1000));
+    const timeoutMs = Number(options.timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS;
+    const maxTimeSec = Math.max(4, Math.ceil(timeoutMs / 1000));
+    const maxBuffer = Number(options.maxBuffer) > 0 ? Number(options.maxBuffer) : 20 * 1024 * 1024;
     const args = [
       "-sS",
       "-L",
@@ -1837,9 +1849,9 @@ function fetchJsonViaCurl(url, options = {}) {
       "curl",
       args,
       {
-        timeout: EXTERNAL_FETCH_TIMEOUT_MS + 2_000,
+        timeout: timeoutMs + 2_000,
         windowsHide: true,
-        maxBuffer: 3 * 1024 * 1024,
+        maxBuffer,
       },
       (error, stdout) => {
         if (error || !stdout) {
@@ -2147,18 +2159,22 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
 }
 
 async function fetchYandexJsonWithBlockCheck(url) {
+  const yandexTimeoutMs = 20_000;
+  const yandexMaxBuffer = 20 * 1024 * 1024;
   const cookiePath = getCookiePathForUrl(url);
   const cookieHeader = buildCookieHeaderForUrl(url, cookiePath || "");
 
   const curlJson = await fetchJsonViaCurl(url, {
     cookiesPath: cookiePath || "",
+    timeoutMs: yandexTimeoutMs,
+    maxBuffer: yandexMaxBuffer,
   }).catch(() => null);
   if (curlJson) {
     return { blocked: false, data: curlJson };
   }
 
   const response = await requestTextWithRedirect(url, {
-    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    timeoutMs: yandexTimeoutMs,
     cookiesPath: cookiePath || "",
     headers: {
       "user-agent":
