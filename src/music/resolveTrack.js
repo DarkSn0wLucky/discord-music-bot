@@ -31,8 +31,10 @@ const METADATA_ITEM_RESOLVE_TIMEOUT_FAST_MS = 4_000;
 const PLAYLIST_RESOLVE_BUDGET_MS = 90_000;
 const PLAYLIST_FAST_MODE_THRESHOLD = 40;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
+const YANDEX_REGION_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const HAS_SPOTIFY_AUTH = Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET && SPOTIFY_REFRESH_TOKEN);
 const networkCheckCache = new Map();
+const yandexRegionCheckCache = new Map();
 const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
 
 function limitItems(list, limit) {
@@ -1559,6 +1561,34 @@ function isYandexRegionBlockedHtml(html) {
   );
 }
 
+async function isYandexPlaylistRegionBlocked(info, originalUrl) {
+  const uuidKey = String(info?.playlistUuid || "").toLowerCase();
+  const cacheKey = uuidKey || String(originalUrl || "").trim().toLowerCase();
+  if (!cacheKey) {
+    return false;
+  }
+
+  const cached = yandexRegionCheckCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt <= YANDEX_REGION_CHECK_CACHE_TTL_MS) {
+    return cached.blocked;
+  }
+
+  const response = await requestTextWithRedirect(originalUrl, {
+    timeoutMs: EXTERNAL_FETCH_TIMEOUT_MS,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://music.yandex.ru/",
+    },
+  }).catch(() => null);
+
+  const blocked = Boolean(response && response.statusCode >= 200 && response.statusCode < 300 && isYandexRegionBlockedHtml(response.body));
+  yandexRegionCheckCache.set(cacheKey, { blocked, checkedAt: Date.now() });
+  return blocked;
+}
+
 async function resolveYandexPlaylistTarget(info, originalUrl) {
   if (info.playlistOwner && info.playlistKind) {
     return {
@@ -1649,6 +1679,11 @@ async function resolveYandexUrl(url, requestedBy) {
   }
 
   if (info.playlistKind || info.playlistUuid) {
+    const regionBlocked = await isYandexPlaylistRegionBlocked(info, url);
+    if (regionBlocked) {
+      throw new Error("Яндекс Музыка недоступна на сервере по региону. Плейлист прочитать нельзя.");
+    }
+
     const target = await resolveYandexPlaylistTarget(info, url);
     if (target?.blocked) {
       throw new Error("Яндекс Музыка недоступна на сервере по региону. Плейлист прочитать нельзя.");
