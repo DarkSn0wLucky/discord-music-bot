@@ -2262,6 +2262,10 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
   }
 
   if (isYandexBlockedResponse(response)) {
+    const fallbackTarget = pickPreferredYandexPlaylistTarget(hintTarget, directTarget);
+    if (fallbackTarget?.owner && fallbackTarget?.kind) {
+      return fallbackTarget;
+    }
     return { blocked: true };
   }
 
@@ -2413,12 +2417,14 @@ async function resolveYandexUrl(url, requestedBy) {
 
   const hasYandexCookies = Boolean(resolveExistingFilePath(YANDEX_COOKIES_PATH));
   let playlistMappingFailed = false;
+  let antiBotDetected = false;
 
   if (info.playlistKind || info.playlistUuid) {
     const playlistResolveStartedAt = Date.now();
     const target = await resolveYandexPlaylistTarget(info, url);
     if (target?.blocked) {
-      throw buildYandexAntiBotError(hasYandexCookies);
+      antiBotDetected = true;
+      playlistMappingFailed = true;
     }
 
     if (target?.owner && target?.kind) {
@@ -2426,7 +2432,8 @@ async function resolveYandexUrl(url, requestedBy) {
         maxBudgetMs: YANDEX_PLAYLIST_FETCH_BUDGET_MS,
       });
       if (playlistData?.blocked) {
-        throw buildYandexAntiBotError(hasYandexCookies);
+        antiBotDetected = true;
+        playlistMappingFailed = true;
       }
 
       const playlist = playlistData?.playlist;
@@ -2628,6 +2635,9 @@ async function resolveYandexUrl(url, requestedBy) {
   }
 
   if (playlistMappingFailed) {
+    if (antiBotDetected) {
+      throw buildYandexAntiBotError(hasYandexCookies);
+    }
     throw new Error("Не удалось сопоставить треки плейлиста Яндекс Музыки с YouTube.");
   }
 
