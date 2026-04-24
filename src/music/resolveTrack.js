@@ -2366,6 +2366,8 @@ async function fetchYandexPlaylistData(origin, owner, kind, options = {}) {
   ];
 
   const attemptedUrls = new Set();
+  let blockedAttempts = 0;
+  let nonBlockedAttempts = 0;
   for (const currentOrigin of candidateOrigins) {
     for (const variant of requestVariants) {
       const playlistUrl = new URL("/handlers/playlist.jsx", currentOrigin);
@@ -2396,14 +2398,20 @@ async function fetchYandexPlaylistData(origin, owner, kind, options = {}) {
         timeoutMs: attemptTimeoutMs,
       });
       if (attempt?.blocked) {
-        return { blocked: true };
+        blockedAttempts += 1;
+        continue;
       }
+      nonBlockedAttempts += 1;
 
       const playlist = extractYandexPlaylistFromPayload(attempt?.data);
       if (playlist) {
         return { playlist };
       }
     }
+  }
+
+  if (blockedAttempts > 0 && nonBlockedAttempts === 0) {
+    return { blocked: true };
   }
 
   return null;
@@ -2452,8 +2460,12 @@ async function resolveYandexUrl(url, requestedBy) {
           })
           .filter((item) => String(item?.title || "").trim());
 
+        const playlistTotalBudgetMs =
+          metadata.length >= 150
+            ? Math.max(YANDEX_PLAYLIST_TOTAL_BUDGET_MS, 180_000)
+            : YANDEX_PLAYLIST_TOTAL_BUDGET_MS;
         const elapsedBeforeMatchMs = Date.now() - playlistResolveStartedAt;
-        const budgetLeftForMatchMs = YANDEX_PLAYLIST_TOTAL_BUDGET_MS - elapsedBeforeMatchMs;
+        const budgetLeftForMatchMs = playlistTotalBudgetMs - elapsedBeforeMatchMs;
         if (budgetLeftForMatchMs <= 3_500) {
           playlistMappingFailed = true;
         } else {
@@ -2471,7 +2483,7 @@ async function resolveYandexUrl(url, requestedBy) {
             resolveBudgetMs: firstPassBudgetMs,
             itemResolveTimeoutMs: perItemTimeoutMs,
             maxConcurrency: metadata.length >= 120 ? 8 : 6,
-            queryLimit: metadata.length >= 120 ? 2 : 3,
+            queryLimit: 3,
             returnDetailed: true,
           });
 
@@ -2481,7 +2493,7 @@ async function resolveYandexUrl(url, requestedBy) {
 
           const firstPassMissed = Array.isArray(firstPass?.missedIndices) ? firstPass.missedIndices : [];
           const elapsedAfterFirstPassMs = Date.now() - playlistResolveStartedAt;
-          const budgetLeftAfterFirstPassMs = YANDEX_PLAYLIST_TOTAL_BUDGET_MS - elapsedAfterFirstPassMs;
+          const budgetLeftAfterFirstPassMs = playlistTotalBudgetMs - elapsedAfterFirstPassMs;
 
           if (firstPassMissed.length > 0 && budgetLeftAfterFirstPassMs > 4_000) {
             const missedMetadata = firstPassMissed.map((index) => metadata[index]).filter(Boolean);
@@ -2510,13 +2522,62 @@ async function resolveYandexUrl(url, requestedBy) {
             }
           }
 
-          const resolvedTracks = limitItems(tracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
-          if (resolvedTracks.length > 0) {
+          const strictResolvedTracks = limitItems(tracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+          if (strictResolvedTracks.length > 0) {
             return {
-              tracks: resolvedTracks,
+              tracks: strictResolvedTracks,
               kind: "yandex_playlist",
               title: playlist?.title || "Yandex playlist",
             };
+          }
+
+          const elapsedAfterStrictMs = Date.now() - playlistResolveStartedAt;
+          const budgetLeftAfterStrictMs = playlistTotalBudgetMs - elapsedAfterStrictMs;
+
+          // Safety net: if strict matching yielded zero tracks, run one relaxed pass.
+          // We still filter by duration to avoid obviously wrong mappings.
+          if (budgetLeftAfterStrictMs > 6_000) {
+            const relaxedPass = await resolveTracksFromMetadataItems(metadata, requestedBy, {
+              strictMatch: false,
+              allowSyntheticFallback: false,
+              allowYtdlpFallback: true,
+              disableSecondaryMetadataLookup: false,
+              resolveBudgetMs: Math.min(60_000, Math.max(6_000, budgetLeftAfterStrictMs - 500)),
+              itemResolveTimeoutMs: Math.min(7_000, perItemTimeoutMs + 2_000),
+              maxConcurrency: metadata.length >= 150 ? 8 : 6,
+              queryLimit: 4,
+              returnDetailed: true,
+            });
+
+            const relaxedTracksByIndex = Array.isArray(relaxedPass?.tracksByIndex)
+              ? relaxedPass.tracksByIndex
+              : [];
+            const relaxedDurationSafeTracks = [];
+
+            for (let index = 0; index < relaxedTracksByIndex.length; index += 1) {
+              const candidate = relaxedTracksByIndex[index];
+              if (!candidate) {
+                continue;
+              }
+
+              if (!isDurationComparable(metadata[index], candidate)) {
+                continue;
+              }
+
+              relaxedDurationSafeTracks.push(candidate);
+            }
+
+            const relaxedResolvedTracks = limitItems(
+              dedupeTracksByIdentity(dedupeTracksByUrl(relaxedDurationSafeTracks)),
+              MAX_PLAYLIST_ITEMS
+            );
+            if (relaxedResolvedTracks.length > 0) {
+              return {
+                tracks: relaxedResolvedTracks,
+                kind: "yandex_playlist",
+                title: playlist?.title || "Yandex playlist",
+              };
+            }
           }
         }
       }
