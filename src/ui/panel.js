@@ -25,12 +25,12 @@ function detectSourceKey(track) {
 
 function sourceLabel(track) {
   const key = detectSourceKey(track);
-  if (key === "youtube") return "🔴 YouTube";
-  if (key === "yandex") return "🟠 Yandex Music";
-  if (key === "vk") return "🔵 VK Music";
-  if (key === "soundcloud") return "🟠 SoundCloud";
-  if (key === "spotify") return "🟢 Spotify";
-  if (key === "deezer") return "🟣 Deezer";
+  if (key === "youtube") return "YouTube";
+  if (key === "yandex") return "Yandex Music";
+  if (key === "vk") return "VK Music";
+  if (key === "soundcloud") return "SoundCloud";
+  if (key === "spotify") return "Spotify";
+  if (key === "deezer") return "Deezer";
   return safeLinkText(track?.source || "Источник не указан");
 }
 
