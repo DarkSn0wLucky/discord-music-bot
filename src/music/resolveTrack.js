@@ -1670,6 +1670,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
   const results = new Array(sourceItems.length).fill(null);
   const querySettledCache = new Map();
   const queryInflight = new Map();
+  const cacheKeyByIndex = new Array(sourceItems.length).fill("");
   const returnDetailed = options.returnDetailed === true;
   let timedOutCount = 0;
   let cursor = 0;
@@ -1734,6 +1735,7 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
         return isStrictMetadataMatch(candidate, itemForCheck, effectiveQuery || primaryQuery);
       };
       const cacheKey = queries.join("||");
+      cacheKeyByIndex[index] = cacheKey;
       if (querySettledCache.has(cacheKey)) {
         const cachedTrack = querySettledCache.get(cacheKey);
         if (cachedTrack) {
@@ -1813,6 +1815,26 @@ async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) 
   }
 
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  if (queryInflight.size > 0) {
+    await Promise.allSettled([...queryInflight.values()]);
+  }
+
+  for (let index = 0; index < sourceItems.length; index += 1) {
+    if (results[index]) {
+      continue;
+    }
+
+    const cacheKey = cacheKeyByIndex[index];
+    if (!cacheKey) {
+      continue;
+    }
+
+    const settledTrack = querySettledCache.get(cacheKey);
+    if (settledTrack) {
+      results[index] = settledTrack;
+    }
+  }
 
   if (allowSyntheticFallback) {
     for (let index = 0; index < sourceItems.length; index += 1) {
