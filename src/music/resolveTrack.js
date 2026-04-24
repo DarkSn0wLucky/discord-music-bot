@@ -2544,8 +2544,10 @@ async function resolveYandexUrl(url, requestedBy) {
             }
           }
 
-          const strictResolvedTracks = limitItems(tracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
-          if (strictResolvedTracks.length > 0) {
+          const resolvedByIndex = [...tracksByIndex];
+          const strictResolvedTracks = limitItems(resolvedByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+          const strictCoverage = metadata.length > 0 ? strictResolvedTracks.length / metadata.length : 0;
+          if (strictResolvedTracks.length > 0 && strictCoverage >= 0.95) {
             return {
               tracks: strictResolvedTracks,
               kind: "yandex_playlist",
@@ -2575,31 +2577,84 @@ async function resolveYandexUrl(url, requestedBy) {
               ? relaxedPass.tracksByIndex
               : [];
             const relaxedDurationSafeTracks = [];
+            const relaxedTokenSafeTracks = [];
 
             for (let index = 0; index < relaxedTracksByIndex.length; index += 1) {
+              if (resolvedByIndex[index]) {
+                continue;
+              }
+
               const candidate = relaxedTracksByIndex[index];
               if (!candidate) {
                 continue;
               }
 
               if (!isDurationComparable(metadata[index], candidate)) {
+                const metadataQuery = buildQueryFromArtistTitle(metadata[index]?.artist, metadata[index]?.title);
+                if (hasQueryTokenCoverage(`${candidate.author || ""} ${candidate.title || ""}`, metadataQuery)) {
+                  resolvedByIndex[index] = candidate;
+                  relaxedTokenSafeTracks.push(candidate);
+                }
                 continue;
               }
 
+              resolvedByIndex[index] = candidate;
               relaxedDurationSafeTracks.push(candidate);
             }
 
-            const relaxedResolvedTracks = limitItems(
-              dedupeTracksByIdentity(dedupeTracksByUrl(relaxedDurationSafeTracks)),
-              MAX_PLAYLIST_ITEMS
-            );
-            if (relaxedResolvedTracks.length > 0) {
+            const relaxedResolvedTracks = limitItems(resolvedByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+            const relaxedCoverage = metadata.length > 0 ? relaxedResolvedTracks.length / metadata.length : 0;
+            if (relaxedResolvedTracks.length > 0 && relaxedCoverage >= 0.95) {
               return {
                 tracks: relaxedResolvedTracks,
                 kind: "yandex_playlist",
                 title: playlist?.title || "Yandex playlist",
               };
             }
+
+            if (relaxedDurationSafeTracks.length > 0 || relaxedTokenSafeTracks.length > 0) {
+              const nearFinalTracksByIndex = [...resolvedByIndex];
+              for (let index = 0; index < metadata.length; index += 1) {
+                if (nearFinalTracksByIndex[index]) {
+                  continue;
+                }
+
+                const fallbackTrack = buildMetadataFallbackTrack(metadata[index], requestedBy);
+                if (fallbackTrack) {
+                  nearFinalTracksByIndex[index] = fallbackTrack;
+                }
+              }
+
+              const nearFinalTracks = limitItems(nearFinalTracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+              if (nearFinalTracks.length > 0) {
+                return {
+                  tracks: nearFinalTracks,
+                  kind: "yandex_playlist",
+                  title: playlist?.title || "Yandex playlist",
+                };
+              }
+            }
+          }
+
+          const fallbackTracksByIndex = [...resolvedByIndex];
+          for (let index = 0; index < metadata.length; index += 1) {
+            if (fallbackTracksByIndex[index]) {
+              continue;
+            }
+
+            const fallbackTrack = buildMetadataFallbackTrack(metadata[index], requestedBy);
+            if (fallbackTrack) {
+              fallbackTracksByIndex[index] = fallbackTrack;
+            }
+          }
+
+          const fallbackResolvedTracks = limitItems(fallbackTracksByIndex.filter(Boolean), MAX_PLAYLIST_ITEMS);
+          if (fallbackResolvedTracks.length > 0) {
+            return {
+              tracks: fallbackResolvedTracks,
+              kind: "yandex_playlist",
+              title: playlist?.title || "Yandex playlist",
+            };
           }
         }
       }
