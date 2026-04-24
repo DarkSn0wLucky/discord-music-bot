@@ -583,7 +583,7 @@ class GuildMusicPlayer {
       }
 
       this.currentTrack = null;
-      await this.clearPanel();
+      await this.refreshPanel({ moveToBottom: true });
       this.scheduleAutoDisconnect();
     } finally {
       this.transitionLock = false;
@@ -679,6 +679,32 @@ class GuildMusicPlayer {
     this.cleanupActiveStreamProcess();
     this.player.stop(true);
     return { ok: true, message: "РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ." };
+  }
+
+  async playQueueIndex(index) {
+    const targetIndex = Number(index);
+    if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= this.queue.length) {
+      return { ok: false, message: "Трек в очереди не найден." };
+    }
+
+    const [selected] = this.queue.splice(targetIndex, 1);
+    if (!selected) {
+      return { ok: false, message: "Трек в очереди не найден." };
+    }
+
+    this.queue.unshift(selected);
+
+    if (this.currentTrack) {
+      this.suppressNextTrackAction = true;
+      this.preservePanelOnNextTrack = true;
+      this.forceSkip = true;
+      this.cleanupActiveStreamProcess();
+      this.player.stop(true);
+      return { ok: true, message: `Переключаю на: ${safeLinkText(selected.title)}`, track: selected };
+    }
+
+    await this.playIfIdle();
+    return { ok: true, message: `Запускаю: ${safeLinkText(selected.title)}`, track: selected };
   }
 
   async stop() {

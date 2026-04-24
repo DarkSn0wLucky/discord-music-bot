@@ -29,9 +29,15 @@ const URL_RESOLVE_TIMEOUT_ERROR_CODE = "URL_RESOLVE_TIMEOUT";
 const URL_RESOLVE_HEARTBEAT_INTERVAL_MS = 5_000;
 const QUICK_PLAY_MODAL_ID = "music:quickplay:modal";
 const QUICK_PLAY_QUERY_INPUT_ID = "music:quickplay:query";
+const QUEUE_PICKER_PAGE_SIZE = 25;
+const QUEUE_PICKER_SELECT_ID = "music:queue:pick";
+const QUEUE_PICKER_PREV_ID = "music:queue:prev";
+const QUEUE_PICKER_NEXT_ID = "music:queue:next";
+const QUEUE_PICKER_CLOSE_ID = "music:queue:close";
 const VOICE_PANEL_PREFIX = "voicepanel";
 const VOICE_PANEL_STATE_TTL_MS = 30 * 60_000;
 const voicePanelStateByMessageId = new Map();
+const queuePickerPageState = new Map();
 const VOICE_PANEL_OWNER_LOGIN = String(process.env.VOICE_PANEL_OWNER_LOGIN || "darksnowlucky")
   .trim()
   .toLowerCase();
@@ -199,6 +205,94 @@ function buildTrackPickerRows(customIdPrefix, tracks) {
 
 function buildTrackPickerDescription(query, tracks) {
   return `Запрос: **${safeLinkText(query)}**\nНажми на кнопку с нужным треком (таймаут 30 сек).`;
+}
+
+function getQueuePickerStateKey(interaction) {
+  return `${interaction.guildId}:${interaction.user.id}`;
+}
+
+function getQueuePickerPage(interaction, totalPages) {
+  const key = getQueuePickerStateKey(interaction);
+  const raw = Number(queuePickerPageState.get(key));
+  const maxPage = Math.max(0, totalPages - 1);
+  if (!Number.isFinite(raw)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(maxPage, Math.floor(raw)));
+}
+
+function setQueuePickerPage(interaction, page) {
+  const key = getQueuePickerStateKey(interaction);
+  queuePickerPageState.set(key, Math.max(0, Math.floor(Number(page) || 0)));
+}
+
+function buildQueuePickerPayload(player, page, options = {}) {
+  const notice = String(options.notice || "").trim();
+  const total = player.queue.length;
+  const totalPages = Math.max(1, Math.ceil(total / QUEUE_PICKER_PAGE_SIZE));
+  const currentPage = Math.max(0, Math.min(totalPages - 1, Math.floor(Number(page) || 0)));
+
+  if (total === 0) {
+    return {
+      embeds: [buildActionEmbed("Очередь", `${notice ? `${notice}\n` : ""}Очередь пуста.`)],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(QUEUE_PICKER_CLOSE_ID)
+            .setLabel("Закрыть")
+            .setStyle(ButtonStyle.Secondary)
+        ),
+      ],
+    };
+  }
+
+  const start = currentPage * QUEUE_PICKER_PAGE_SIZE;
+  const slice = player.queue.slice(start, start + QUEUE_PICKER_PAGE_SIZE);
+  const optionsList = slice.map((track, idx) => {
+    const absoluteIndex = start + idx;
+    const position = absoluteIndex + 1;
+    return {
+      label: truncate(`${position}. ${safeLinkText(track.title)}`, 95),
+      description: truncate(`${formatDuration(track.durationSec)} • ${safeLinkText(track.author || track.source || "track")}`, 95),
+      value: String(absoluteIndex),
+    };
+  });
+
+  const selectRow = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(QUEUE_PICKER_SELECT_ID)
+      .setPlaceholder(`Страница ${currentPage + 1}/${totalPages} • выбери трек`)
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(optionsList)
+  );
+
+  const navRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(QUEUE_PICKER_PREV_ID)
+      .setLabel("Назад")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage <= 0),
+    new ButtonBuilder()
+      .setCustomId(QUEUE_PICKER_NEXT_ID)
+      .setLabel("Вперёд")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage >= totalPages - 1),
+    new ButtonBuilder()
+      .setCustomId(QUEUE_PICKER_CLOSE_ID)
+      .setLabel("Закрыть")
+      .setStyle(ButtonStyle.Secondary)
+  );
+
+  return {
+    embeds: [
+      buildActionEmbed(
+        "Очередь",
+        `${notice ? `${notice}\n` : ""}Треков в очереди: **${total}**\nНажми на трек, чтобы запустить его сразу.`
+      ),
+    ],
+    components: [selectRow, navRow],
+  };
 }
 
 async function showQuickPlayModal(interaction) {
@@ -1298,6 +1392,49 @@ async function handleButton(interaction, manager) {
   const voiceCheck = isSameVoiceWithBot(interaction, player);
   if (!voiceCheck.ok) {
     await interaction.reply({ content: voiceCheck.message, ...EPHEMERAL_REPLY });
+    return;
+  }
+
+  if (interaction.customId === BUTTON_IDS.queueOpen) {
+    setQueuePickerPage(interaction, 0);
+    await interaction.reply({
+      ...buildQueuePickerPayload(player, 0),
+      ...EPHEMERAL_REPLY,
+    });
+    return;
+  }
+
+  if (interaction.customId === QUEUE_PICKER_CLOSE_ID) {
+    await interaction.update({
+      embeds: [buildActionEmbed("Очередь", "Меню очереди закрыто.")],
+      components: [],
+    });
+    return;
+  }
+
+  if (interaction.customId === QUEUE_PICKER_PREV_ID || interaction.customId === QUEUE_PICKER_NEXT_ID) {
+    const totalPages = Math.max(1, Math.ceil(player.queue.length / QUEUE_PICKER_PAGE_SIZE));
+    const currentPage = getQueuePickerPage(interaction, totalPages);
+    const nextPage =
+      interaction.customId === QUEUE_PICKER_PREV_ID
+        ? Math.max(0, currentPage - 1)
+        : Math.min(totalPages - 1, currentPage + 1);
+    setQueuePickerPage(interaction, nextPage);
+    await interaction.update(buildQueuePickerPayload(player, nextPage));
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === QUEUE_PICKER_SELECT_ID) {
+    const selectedIndex = Number(interaction.values?.[0]);
+    const result = await player.playQueueIndex(selectedIndex);
+    const totalPages = Math.max(1, Math.ceil(player.queue.length / QUEUE_PICKER_PAGE_SIZE));
+    const currentPage = getQueuePickerPage(interaction, totalPages);
+    const page = Math.max(0, Math.min(totalPages - 1, currentPage));
+    setQueuePickerPage(interaction, page);
+    await interaction.update(buildQueuePickerPayload(player, page, { notice: result.message }));
+    if (result.ok) {
+      await player.refreshPanel({ moveToBottom: true });
+    }
     return;
   }
 

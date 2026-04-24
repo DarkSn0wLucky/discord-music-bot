@@ -3542,7 +3542,13 @@ async function resolveTracks(query, requestedBy) {
       return null;
     });
     if (yandexResolved) {
-      return yandexResolved;
+      return {
+        ...yandexResolved,
+        tracks: (Array.isArray(yandexResolved.tracks) ? yandexResolved.tracks : []).map((track) => ({
+          ...track,
+          catalogSource: track?.catalogSource || "yandex",
+        })),
+      };
     }
 
     if (yandexResolveError?.message) {
@@ -3582,7 +3588,13 @@ async function resolveTracks(query, requestedBy) {
       return null;
     });
     if (vkResolved) {
-      return vkResolved;
+      return {
+        ...vkResolved,
+        tracks: (Array.isArray(vkResolved.tracks) ? vkResolved.tracks : []).map((track) => ({
+          ...track,
+          catalogSource: track?.catalogSource || "vk",
+        })),
+      };
     }
 
     const externalResolved = await resolveGenericExternalUrl(input, requestedBy);

@@ -8,8 +8,31 @@ const BUTTON_IDS = {
   stop: "music:stop",
   shuffle: "music:shuffle",
   loop: "music:loop",
+  queueOpen: "music:queue:open",
   quickPlay: "music:quickplay",
 };
+
+function detectSourceKey(track) {
+  const raw = `${String(track?.catalogSource || "")} ${String(track?.source || "")}`.toLowerCase();
+  if (raw.includes("yandex")) return "yandex";
+  if (raw.includes("vk")) return "vk";
+  if (raw.includes("youtube")) return "youtube";
+  if (raw.includes("soundcloud")) return "soundcloud";
+  if (raw.includes("spotify")) return "spotify";
+  if (raw.includes("deezer")) return "deezer";
+  return "unknown";
+}
+
+function sourceLabel(track) {
+  const key = detectSourceKey(track);
+  if (key === "youtube") return "🔴 YouTube";
+  if (key === "yandex") return "🟠 Yandex Music";
+  if (key === "vk") return "🔵 VK Music";
+  if (key === "soundcloud") return "🟠 SoundCloud";
+  if (key === "spotify") return "🟢 Spotify";
+  if (key === "deezer") return "🟣 Deezer";
+  return safeLinkText(track?.source || "Источник не указан");
+}
 
 function buildPlayerEmbed(player) {
   if (!player.currentTrack) {
@@ -51,7 +74,7 @@ function buildPlayerEmbed(player) {
     .setTitle("Сейчас играет")
     .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
     .addFields(
-      { name: "Источник", value: track.source, inline: true },
+      { name: "Источник", value: sourceLabel(track), inline: true },
       { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
       { name: "Длина очереди", value: String(player.queue.length), inline: true },
       { name: "TIME", value: `${progressBar(elapsedMs, durationMs, 34)}\n${durationText}` },
@@ -99,6 +122,16 @@ function buildControlsRow(player) {
   );
 }
 
+function buildQueueRow(player) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(BUTTON_IDS.queueOpen)
+      .setLabel(`Очередь (${player.queue.length})`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(player.queue.length === 0)
+  );
+}
+
 function buildQuickPlayRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -113,7 +146,7 @@ function buildPanelComponents(player) {
   if (idle) {
     return [buildQuickPlayRow()];
   }
-  return [buildControlsRow(player)];
+  return [buildControlsRow(player), buildQueueRow(player)];
 }
 
 function buildQueueEmbed(player) {

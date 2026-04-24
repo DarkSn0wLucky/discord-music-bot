@@ -71,7 +71,7 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith("music:")) {
+    if ((interaction.isButton() || interaction.isStringSelectMenu()) && interaction.customId.startsWith("music:")) {
       await handleButton(interaction, manager);
       return;
     }
