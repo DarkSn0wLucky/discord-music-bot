@@ -125,6 +125,10 @@ function buildControlsRow(player) {
 function buildQueueRow(player) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId(BUTTON_IDS.quickPlay)
+      .setLabel("Добавить трек")
+      .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
       .setCustomId(BUTTON_IDS.queueOpen)
       .setLabel(`Очередь (${player.queue.length})`)
       .setStyle(ButtonStyle.Secondary)
