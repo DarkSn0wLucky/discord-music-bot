@@ -1979,17 +1979,18 @@ function fetchJsonViaCurl(url, options = {}) {
       "accept-language: ru,en-US;q=0.9,en;q=0.8",
       "-H",
       "referer: https://music.yandex.ru/",
-      String(url),
     ];
 
     if (shouldUseHomeL2tpForUrl(url) && isHomeL2tpEnabled()) {
-      args.splice(5, 0, "--interface", String(L2TP_SOURCE_IP).trim());
+      args.push("--interface", String(L2TP_SOURCE_IP).trim());
     }
 
     const cookiePath = resolveExistingFilePath(options.cookiesPath) || getCookiePathForUrl(url);
     if (cookiePath) {
-      args.splice(5, 0, "--cookie", cookiePath);
+      args.push("--cookie", cookiePath);
     }
+
+    args.push(String(url));
 
     execFile(
       "curl",
@@ -2040,17 +2041,18 @@ function requestTextViaCurl(url, options = {}) {
       "referer: https://music.yandex.ru/",
       "--write-out",
       "\n__CURL_META__%{http_code}|%{url_effective}",
-      String(url),
     ];
 
     if (shouldUseHomeL2tpForUrl(url) && isHomeL2tpEnabled()) {
-      args.splice(5, 0, "--interface", String(L2TP_SOURCE_IP).trim());
+      args.push("--interface", String(L2TP_SOURCE_IP).trim());
     }
 
     const cookiePath = resolveExistingFilePath(options.cookiesPath) || getCookiePathForUrl(url);
     if (cookiePath) {
-      args.splice(5, 0, "--cookie", cookiePath);
+      args.push("--cookie", cookiePath);
     }
+
+    args.push(String(url));
 
     execFile(
       "curl",

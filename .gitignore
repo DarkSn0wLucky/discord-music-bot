@@ -1,4 +1,6 @@
 node_modules/
 .env
+.cache/
+*_cookies.txt
 cookies.txt
 npm-debug.log*
