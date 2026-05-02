@@ -2015,6 +2015,8 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   const maxRedirects = 4;
   const timeoutMs = Number(options.timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS;
   const headers = options.headers || {};
+  const method = String(options.method || "GET").trim().toUpperCase() || "GET";
+  const body = options.body === undefined || options.body === null ? null : Buffer.from(String(options.body));
 
   let parsedUrl;
   try {
@@ -2040,9 +2042,13 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
         normalizedHeaders.cookie = cookieHeader;
       }
       const requestOptions = {
-        method: "GET",
+        method,
         headers: normalizedHeaders,
       };
+
+      if (body && !normalizedHeaders["content-length"] && !normalizedHeaders["Content-Length"]) {
+        normalizedHeaders["content-length"] = String(body.length);
+      }
 
       if (forcedLocalAddress) {
         requestOptions.localAddress = forcedLocalAddress;
@@ -2084,6 +2090,9 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
         req.destroy(new Error("Request timeout"));
       });
       req.on("error", reject);
+      if (body) {
+        req.write(body);
+      }
       req.end();
     });
 
@@ -3084,29 +3093,67 @@ async function resolveDeezerUrl(url, requestedBy) {
   };
 }
 
-function normalizeVkEntryUrl(entry, fallbackUrl) {
-  const candidates = [entry?.webpage_url, entry?.url, entry?.original_url]
+function normalizeComparableUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(text);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/u, "");
+  } catch {
+    return text.replace(/\/+$/u, "");
+  }
+}
+
+function normalizeVkEntryUrl(entry, fallbackUrl, options = {}) {
+  const allowFallback = options.allowFallback !== false;
+  const fallback = String(fallbackUrl || "").trim();
+  const comparableFallback = normalizeComparableUrl(fallback);
+  const formatUrls = Array.isArray(entry?.formats)
+    ? entry.formats.map((format) => format?.url)
+    : [];
+  const candidates = [entry?.url, ...formatUrls, entry?.webpage_url, entry?.original_url]
     .map((value) => String(value || "").trim())
     .filter(Boolean);
 
   for (const value of candidates) {
+    let normalizedUrl = "";
     if (/^https?:\/\//i.test(value)) {
-      return value;
+      normalizedUrl = value;
+    } else if (value.startsWith("//")) {
+      normalizedUrl = `https:${value}`;
+    } else if (value.startsWith("/")) {
+      normalizedUrl = `https://vk.com${value}`;
+    } else if (/^(audio|music|playlist|wall|video)/i.test(value)) {
+      normalizedUrl = `https://vk.com/${value.replace(/^\/+/, "")}`;
     }
-    if (value.startsWith("/")) {
-      return `https://vk.com${value}`;
+
+    if (!normalizedUrl) {
+      continue;
     }
-    if (/^(audio|music|playlist|wall|video)/i.test(value)) {
-      return `https://vk.com/${value.replace(/^\/+/, "")}`;
+
+    if (!allowFallback && comparableFallback && normalizeComparableUrl(normalizedUrl) === comparableFallback) {
+      continue;
     }
+
+    return normalizedUrl;
   }
 
-  return fallbackUrl;
+  return allowFallback ? fallback : "";
 }
 
-function toVkTrack(entry, requestedBy, fallbackUrl) {
+function toVkTrack(entry, requestedBy, fallbackUrl, options = {}) {
   const durationSec = Number(entry?.duration) || 0;
-  const url = normalizeVkEntryUrl(entry, fallbackUrl);
+  const url = normalizeVkEntryUrl(entry, fallbackUrl, {
+    allowFallback: options.allowFallbackUrl !== false,
+  });
+  if (!url) {
+    return null;
+  }
+
   const author = String(entry?.uploader || entry?.artist || entry?.channel || "VK Music").trim() || "VK Music";
   const title = String(entry?.title || entry?.track || "VK Music track").trim() || "VK Music track";
   const metadata = metadataFromExtractorEntry(entry, "") || {
@@ -3115,7 +3162,6 @@ function toVkTrack(entry, requestedBy, fallbackUrl) {
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
   };
-  const fallbackTrack = buildMetadataFallbackTrack(metadata, requestedBy);
   const searchQuery = buildQueryFromArtistTitle(metadata.artist, metadata.title) || title;
 
   return {
@@ -3133,9 +3179,401 @@ function toVkTrack(entry, requestedBy, fallbackUrl) {
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
     searchQuery,
-    fallbackTracks: fallbackTrack ? [fallbackTrack] : [],
+    fallbackTracks: [],
     catalogSource: "vk",
   };
+}
+
+const VK_AUDIO_BASE64_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN0PQRSTUVWXYZO123456789+/=";
+
+function decodeVkAudioMask(encoded) {
+  let decoded = "";
+  let accumulator = 0;
+  let index = 0;
+
+  for (const character of String(encoded || "")) {
+    const value = VK_AUDIO_BASE64_CHARS.indexOf(character);
+    if (value < 0) {
+      continue;
+    }
+
+    const phase = index % 4;
+    accumulator = phase ? 64 * accumulator + value : value;
+    index += 1;
+    if (phase) {
+      decoded += String.fromCharCode(255 & (accumulator >> ((-2 * index) & 6)));
+    }
+  }
+
+  return decoded;
+}
+
+function unmaskVkAudioUrl(rawUrl, ownerId = 0) {
+  const value = decodeHtmlEntities(rawUrl || "");
+  if (!value.includes("audio_api_unavailable") || !value.includes("?extra=")) {
+    return value;
+  }
+
+  try {
+    const extra = value.split("?extra=")[1] || "";
+    const [encodedUrl, encodedInfo] = extra.split("#");
+    const infoParts = decodeVkAudioMask(safeDecodeURIComponent(encodedInfo)).split(String.fromCharCode(11));
+    const base = Number(infoParts[1]);
+    const vkId = Number(ownerId) || 0;
+    if (!Number.isFinite(base)) {
+      return value;
+    }
+
+    const chars = [...decodeVkAudioMask(safeDecodeURIComponent(encodedUrl))];
+    const urlLength = chars.length;
+    const indexes = new Array(urlLength);
+    let shuffleIndex = Math.trunc(base) ^ vkId;
+
+    for (let n = urlLength - 1; n >= 0; n -= 1) {
+      shuffleIndex = ((urlLength * (n + 1)) ^ (shuffleIndex + n)) % urlLength;
+      indexes[n] = shuffleIndex;
+    }
+
+    for (let n = 1; n < urlLength; n += 1) {
+      const current = chars[n];
+      const targetIndex = indexes[urlLength - 1 - n];
+      chars[n] = chars[targetIndex];
+      chars[targetIndex] = current;
+    }
+
+    return chars.join("");
+  } catch {
+    return value;
+  }
+}
+
+function normalizeVkPlayableAudioUrl(rawUrl, decoderVkId = 0) {
+  const unmasked = unmaskVkAudioUrl(rawUrl, decoderVkId);
+  return unmasked.replace(/\/[0-9a-f]+(\/audios)?\/([0-9a-f]+)\/index\.m3u8/iu, "$1/$2.mp3");
+}
+
+function isVkAudioFieldArray(value) {
+  return Array.isArray(value) && value.length >= 6 && (
+    Number.isFinite(Number(value[0])) ||
+    Number.isFinite(Number(value[1])) ||
+    typeof value[2] === "string"
+  );
+}
+
+function collectVkAudioPayloadItems(payload) {
+  if (!payload) {
+    return [];
+  }
+
+  if (isVkAudioFieldArray(payload) || (!Array.isArray(payload) && typeof payload === "object")) {
+    return [payload];
+  }
+
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+
+  return payload.flatMap((item) => collectVkAudioPayloadItems(item));
+}
+
+function firstVkCoverUrl(value) {
+  const text = firstNonEmpty(value);
+  if (!text) {
+    return null;
+  }
+
+  return text.split(",").map((item) => item.trim()).filter(Boolean).pop() || null;
+}
+
+function vkAudioPayloadToExtractorEntry(rawAudio) {
+  const isFieldArray = isVkAudioFieldArray(rawAudio);
+  const id = firstNonEmpty(isFieldArray ? rawAudio[0] : rawAudio?.id, rawAudio?.audio_id, rawAudio?.audioId);
+  const ownerId = firstNonEmpty(
+    isFieldArray ? rawAudio[1] : rawAudio?.owner_id,
+    rawAudio?.ownerId,
+    rawAudio?.owner,
+    rawAudio?.oid
+  );
+  const rawUrl = firstNonEmpty(isFieldArray ? rawAudio[2] : rawAudio?.url, rawAudio?.src, rawAudio?.mp3);
+  const title = decodeHtmlEntities(firstNonEmpty(isFieldArray ? rawAudio[3] : rawAudio?.title, rawAudio?.track));
+  const artist = decodeHtmlEntities(firstNonEmpty(
+    isFieldArray ? rawAudio[4] : rawAudio?.artist,
+    rawAudio?.performer,
+    rawAudio?.author
+  ));
+  const duration = Number(isFieldArray ? rawAudio[5] : rawAudio?.duration) || 0;
+  const coverUrl = firstVkCoverUrl(isFieldArray ? rawAudio[14] : firstNonEmpty(rawAudio?.coverUrl, rawAudio?.cover_url));
+  const rawDecoderVkId = isFieldArray ? rawAudio[15]?.vk_id : firstNonEmpty(rawAudio?.vk_id, rawAudio?.extra?.vk_id);
+  const decoderVkId = rawDecoderVkId === undefined || rawDecoderVkId === null || rawDecoderVkId === ""
+    ? ownerId
+    : rawDecoderVkId;
+  const url = normalizeVkPlayableAudioUrl(rawUrl, decoderVkId);
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return null;
+  }
+
+  const webpageUrl = ownerId && id ? `https://vk.com/audio${ownerId}_${id}` : "";
+  return {
+    id: ownerId && id ? `${ownerId}_${id}` : id,
+    url,
+    webpage_url: webpageUrl,
+    original_url: webpageUrl,
+    title: title || "VK Music track",
+    artist,
+    uploader: artist || "VK Music",
+    duration,
+    thumbnail: coverUrl,
+  };
+}
+
+function extractVkAudioEntriesFromHtml(html) {
+  const payloadItems = extractVkAudioPayloadItemsFromHtml(html);
+  return vkAudioPayloadItemsToExtractorEntries(payloadItems);
+}
+
+function extractVkAudioPayloadItemsFromHtml(html) {
+  const items = [];
+  const source = String(html || "");
+  const attributePattern = /\bdata-audio=(["'])([\s\S]*?)\1/giu;
+  let match;
+
+  while ((match = attributePattern.exec(source))) {
+    const decodedPayload = decodeHtmlEntities(match[2]);
+    const parsed = parseJsonPayload(decodedPayload);
+    if (!parsed) {
+      continue;
+    }
+
+    items.push(...collectVkAudioPayloadItems(parsed));
+    if (items.length >= MAX_PLAYLIST_ITEMS) {
+      return limitItems(items, MAX_PLAYLIST_ITEMS);
+    }
+  }
+
+  return items;
+}
+
+function vkAudioPayloadItemsToExtractorEntries(payloadItems) {
+  const entries = [];
+  const seenUrls = new Set();
+
+  for (const item of limitItems(payloadItems, MAX_PLAYLIST_ITEMS)) {
+    const entry = vkAudioPayloadToExtractorEntry(item);
+    if (!entry?.url || seenUrls.has(entry.url)) {
+      continue;
+    }
+
+    seenUrls.add(entry.url);
+    entries.push(entry);
+  }
+
+  return entries;
+}
+
+function mergeVkExtractorEntries(...entryLists) {
+  const entries = [];
+  const seenUrls = new Set();
+
+  for (const entry of entryLists.flat()) {
+    if (!entry?.url || seenUrls.has(entry.url)) {
+      continue;
+    }
+
+    seenUrls.add(entry.url);
+    entries.push(entry);
+    if (entries.length >= MAX_PLAYLIST_ITEMS) {
+      break;
+    }
+  }
+
+  return entries;
+}
+
+function vkReloadIdFromPayload(rawAudio) {
+  if (isVkAudioFieldArray(rawAudio)) {
+    const hashes = String(rawAudio[13] || "").split("/");
+    if (rawAudio[1] && rawAudio[0] && hashes[2] && hashes[5]) {
+      return `${rawAudio[1]}_${rawAudio[0]}_${hashes[2]}_${hashes[5]}`;
+    }
+  }
+
+  const hashes = String(rawAudio?.hashes || rawAudio?.hash || "").split("/");
+  const ownerId = firstNonEmpty(rawAudio?.owner_id, rawAudio?.ownerId, rawAudio?.owner, rawAudio?.oid);
+  const id = firstNonEmpty(rawAudio?.id, rawAudio?.audio_id, rawAudio?.audioId);
+  if (ownerId && id && hashes[2] && hashes[5]) {
+    return `${ownerId}_${id}_${hashes[2]}_${hashes[5]}`;
+  }
+
+  return "";
+}
+
+async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath) {
+  const reloadIds = limitItems(payloadItems, MAX_PLAYLIST_ITEMS)
+    .map(vkReloadIdFromPayload)
+    .filter(Boolean);
+
+  if (reloadIds.length === 0) {
+    return [];
+  }
+
+  const entries = [];
+  const seenUrls = new Set();
+
+  for (let index = 0; index < reloadIds.length && entries.length < MAX_PLAYLIST_ITEMS; index += 10) {
+    const chunk = reloadIds.slice(index, index + 10);
+    const body = new URLSearchParams({
+      act: "reload_audio",
+      ids: chunk.join(","),
+    }).toString();
+    const response = await requestTextWithRedirect("https://m.vk.com/audio", {
+      method: "POST",
+      body,
+      timeoutMs: 15_000,
+      cookiesPath,
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        accept: "application/json,text/plain,*/*",
+        "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "x-requested-with": "XMLHttpRequest",
+        origin: "https://m.vk.com",
+        referer: sourceUrl || "https://m.vk.com/audio",
+      },
+    }).catch(() => null);
+
+    if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+      continue;
+    }
+
+    const parsed = parseJsonPayload(String(response.body || "").replace(/^<!--\s*/u, ""));
+    const reloadedItems = collectVkAudioPayloadItems(parsed?.data?.[0] || parsed?.payload?.[1] || parsed);
+    for (const entry of vkAudioPayloadItemsToExtractorEntries(reloadedItems)) {
+      if (!entry?.url || seenUrls.has(entry.url)) {
+        continue;
+      }
+
+      seenUrls.add(entry.url);
+      entries.push(entry);
+      if (entries.length >= MAX_PLAYLIST_ITEMS) {
+        break;
+      }
+    }
+  }
+
+  return entries;
+}
+
+function parseVkPlaylistInfoFromUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const text = `${parsed.pathname}${parsed.search}`;
+    const match =
+      text.match(/\/music\/playlist\/(-?\d+)_(\d+)(?:_([\da-f]+))?/iu) ||
+      text.match(/act=audio_playlist(-?\d+)_(\d+)/iu);
+    if (!match?.[1] || !match?.[2]) {
+      return null;
+    }
+
+    return {
+      ownerId: match[1],
+      playlistId: match[2],
+      accessHash:
+        match[3] ||
+        parsed.searchParams.get("api_view") ||
+        parsed.searchParams.get("access_hash") ||
+        parsed.searchParams.get("hash") ||
+        "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildVkHtmlFetchUrls(url) {
+  const urls = [String(url || "").trim()].filter(Boolean);
+  const info = parseVkPlaylistInfoFromUrl(url);
+  if (!info) {
+    return urls;
+  }
+
+  const mobileUrl = new URL("https://m.vk.com/audio");
+  mobileUrl.searchParams.set("act", `audio_playlist${info.ownerId}_${info.playlistId}`);
+  if (info.accessHash) {
+    mobileUrl.searchParams.set("api_view", info.accessHash);
+  }
+  const mobileUrlText = mobileUrl.toString();
+  if (!urls.includes(mobileUrlText)) {
+    urls.push(mobileUrlText);
+  }
+
+  return urls;
+}
+
+async function fetchVkHtmlPage(url, cookiesPath) {
+  return requestTextWithRedirect(url, {
+    timeoutMs: 20_000,
+    cookiesPath,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://vk.com/",
+    },
+  }).catch(() => null);
+}
+
+async function resolveVkUrlViaHtml(url, requestedBy, cookiesPath) {
+  for (const fetchUrl of buildVkHtmlFetchUrls(url)) {
+    const response = await fetchVkHtmlPage(fetchUrl, cookiesPath);
+    if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+      continue;
+    }
+
+    const payloadItems = extractVkAudioPayloadItemsFromHtml(response.body);
+    const directEntries = vkAudioPayloadItemsToExtractorEntries(payloadItems);
+    const reloadedEntries = await fetchVkReloadAudioEntries(
+      payloadItems,
+      response.finalUrl || fetchUrl,
+      cookiesPath
+    );
+    const entries = mergeVkExtractorEntries(directEntries, reloadedEntries);
+    if (entries.length === 0) {
+      continue;
+    }
+
+    const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
+      .map((entry) => toVkTrack(entry, requestedBy, url, { allowFallbackUrl: false }))
+      .filter((track) => track?.url);
+
+    if (tracks.length === 0) {
+      continue;
+    }
+
+    return {
+      tracks,
+      kind: tracks.length > 1 ? "vk_playlist" : "vk_track",
+      title: extractMetaContent(response.body, "property", "og:title") || extractTitleTag(response.body) || "VK Music",
+    };
+  }
+
+  return null;
+}
+
+function isVkPlaylistLikeUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const text = `${parsed.pathname}${parsed.search}`.toLowerCase();
+    return (
+      text.includes("/music/playlist") ||
+      text.includes("/audios") ||
+      text.includes("section=playlist") ||
+      /(?:^|[?&]w=|\/)wall-?\d+_\d+/iu.test(text)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function metadataFromExtractorEntry(entry, sourceLabel = "") {
@@ -3459,7 +3897,7 @@ async function resolveVkUrl(url, requestedBy) {
     const entries = Array.isArray(vkJson.entries) ? vkJson.entries.filter(Boolean) : [];
     if (entries.length > 0) {
       const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
-        .map((entry) => toVkTrack(entry, requestedBy, url))
+        .map((entry) => toVkTrack(entry, requestedBy, url, { allowFallbackUrl: false }))
         .filter((track) => track?.url);
 
       if (tracks.length > 0) {
@@ -3471,7 +3909,8 @@ async function resolveVkUrl(url, requestedBy) {
       }
     }
 
-    const singleTrack = toVkTrack(vkJson, requestedBy, url);
+    const canUseSingleExtractorResult = vkJson?._type !== "playlist" && !isVkPlaylistLikeUrl(url);
+    const singleTrack = canUseSingleExtractorResult ? toVkTrack(vkJson, requestedBy, url) : null;
     if (singleTrack?.url) {
       return {
         tracks: [singleTrack],
@@ -3481,19 +3920,9 @@ async function resolveVkUrl(url, requestedBy) {
     }
   }
 
-  const viaMetadata = await resolveViaYtDlpMetadata(url, requestedBy, {
-    sourceLabel: "VK Music",
-    cookiesPath,
-    timeoutMs: 30_000,
-    playlistKind: "vk_playlist",
-    trackKind: "vk_track",
-    playlistTitleFallback: "VK playlist",
-    trackTitleFallback: "VK track",
-    preferSyntheticPlaylist: true,
-    preferSyntheticTrack: true,
-  });
-  if (viaMetadata) {
-    return viaMetadata;
+  const htmlResolved = await resolveVkUrlViaHtml(url, requestedBy, cookiesPath);
+  if (htmlResolved) {
+    return htmlResolved;
   }
 
   return null;
@@ -3840,15 +4269,15 @@ async function resolveTracks(query, requestedBy) {
       };
     }
 
+    if (isVkMusicUrl) {
+      throw new Error(
+        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443 \u043a\u0430\u043a \u043f\u0440\u044f\u043c\u043e\u0439 VK-\u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a. YouTube fallback \u0434\u043b\u044f VK \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d, \u0447\u0442\u043e\u0431\u044b \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0442\u044c \u0441\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0435 \u0442\u0440\u0435\u043a\u0438. \u041f\u0440\u043e\u0432\u0435\u0440\u044c VK cookies \u0444\u0430\u0439\u043b (VK_COOKIES_PATH)."
+      );
+    }
+
     const externalResolved = await resolveGenericExternalUrl(input, requestedBy);
     if (externalResolved) {
       return externalResolved;
-    }
-
-    if (isVkMusicUrl) {
-      throw new Error(
-        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443. \u041f\u0440\u044f\u043c\u044b\u0435 /music \u0438 /audio \u0441\u0441\u044b\u043b\u043a\u0438 \u0447\u0430\u0441\u0442\u043e \u0431\u043b\u043e\u043a\u0438\u0440\u0443\u044e\u0442\u0441\u044f, \u043d\u0443\u0436\u0435\u043d \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0439 VK cookies \u0444\u0430\u0439\u043b (VK_COOKIES_PATH)."
-      );
     }
 
     throw new Error(

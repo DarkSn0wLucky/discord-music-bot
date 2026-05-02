@@ -164,6 +164,14 @@ function playbackUrlCatalogKind(value) {
   return "";
 }
 
+function isVkCatalogTrack(track) {
+  const source = String(track?.source || "").toLowerCase();
+  const catalogSource = String(track?.catalogSource || "").toLowerCase();
+  const playbackUrl = String(track?.playbackUrl || track?.url || "");
+
+  return catalogSource === "vk" || source.includes("vk") || playbackUrlCatalogKind(playbackUrl) === "vk";
+}
+
 function isSourceUnavailableError(message) {
   if (!message) {
     return false;
@@ -407,6 +415,7 @@ class GuildMusicPlayer {
           const isYouTubeLike =
             /(?:youtube\.com|youtu\.be)/i.test(playbackUrl) ||
             String(next.source || "").toLowerCase().includes("youtube");
+          const isVkTrack = isVkCatalogTrack(next);
 
           const ytDlpArgs = [
             "-o",
@@ -431,7 +440,7 @@ class GuildMusicPlayer {
             }
           }
 
-          if (catalogKind === "vk" || String(next.source || "").toLowerCase().includes("vk")) {
+          if (isVkTrack) {
             ytDlpArgs.push("--referer", "https://vk.com/");
           }
 
@@ -439,7 +448,7 @@ class GuildMusicPlayer {
             ytDlpArgs.push("--referer", "https://music.yandex.ru/");
           }
 
-          if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl)) {
+          if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl) || (isVkTrack && isHomeL2tpPlaybackEnabled())) {
             ytDlpArgs.push("--source-address", String(L2TP_SOURCE_IP || "").trim());
           }
 
@@ -604,7 +613,9 @@ class GuildMusicPlayer {
               .map((url) => String(url || "").trim())
               .filter((url) => url.length > 0)
           );
-          const staticFallbackTracks = uniqueTracksByUrl(next.fallbackTracks, triedUrls, 5);
+          const staticFallbackTracks = isVkCatalogTrack(next)
+            ? []
+            : uniqueTracksByUrl(next.fallbackTracks, triedUrls, 5);
           if (canRetry && staticFallbackTracks.length > 0) {
             const [fallbackTrack, ...restFallbacks] = staticFallbackTracks;
             const retryTrack = {
@@ -633,6 +644,7 @@ class GuildMusicPlayer {
           const fallbackQuery = String(next.searchQuery || next.title || "").trim();
           if (
             canRetry &&
+            !isVkCatalogTrack(next) &&
             isYouTubeLikeTrack &&
             fallbackQuery &&
             isYouTubeAuthGateError(error.message) &&
