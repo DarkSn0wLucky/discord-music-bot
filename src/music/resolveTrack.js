@@ -1,4 +1,4 @@
-﻿const http = require("http");
+const http = require("http");
 const https = require("https");
 const dns = require("dns");
 const os = require("os");
@@ -3701,24 +3701,36 @@ async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath) {
 function parseVkPlaylistInfoFromUrl(value) {
   try {
     const parsed = new URL(String(value || "").trim());
-    const text = `${parsed.pathname}${parsed.search}`;
-    const match =
-      text.match(/\/music\/playlist\/(-?\d+)_(\d+)(?:_([\da-f]+))?/iu) ||
-      text.match(/act=audio_playlist(-?\d+)_(\d+)/iu);
-    if (!match?.[1] || !match?.[2]) {
-      return null;
+    const texts = [
+      `${parsed.pathname}${parsed.search}`,
+      parsed.searchParams.get("z"),
+      parsed.searchParams.get("w"),
+      parsed.hash,
+    ]
+      .map((item) => safeDecodeURIComponent(item || ""))
+      .filter(Boolean);
+
+    for (const text of texts) {
+      const match =
+        text.match(/\/music\/playlist\/(-?\d+)_(\d+)(?:_([\da-f]+))?/iu) ||
+        text.match(/audio_playlist(-?\d+)_(\d+)(?:[\/_]([\da-f]+))?/iu);
+      if (!match?.[1] || !match?.[2]) {
+        continue;
+      }
+
+      return {
+        ownerId: match[1],
+        playlistId: match[2],
+        accessHash:
+          match[3] ||
+          parsed.searchParams.get("api_view") ||
+          parsed.searchParams.get("access_hash") ||
+          parsed.searchParams.get("hash") ||
+          "",
+      };
     }
 
-    return {
-      ownerId: match[1],
-      playlistId: match[2],
-      accessHash:
-        match[3] ||
-        parsed.searchParams.get("api_view") ||
-        parsed.searchParams.get("access_hash") ||
-        parsed.searchParams.get("hash") ||
-        "",
-    };
+    return null;
   } catch {
     return null;
   }
@@ -4037,6 +4049,7 @@ function isVkPlaylistLikeUrl(value) {
     const text = `${parsed.pathname}${parsed.search}`.toLowerCase();
     return (
       text.includes("/music/playlist") ||
+      text.includes("audio_playlist") ||
       text.includes("/audios") ||
       text.includes("section=playlist") ||
       /(?:^|[?&]w=|\/)wall-?\d+_\d+/iu.test(text)
@@ -4751,6 +4764,5 @@ module.exports = {
   resolveTracks,
   resolveSearchCandidates,
 };
-
 
 

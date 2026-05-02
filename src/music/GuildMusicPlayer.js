@@ -893,12 +893,14 @@ class GuildMusicPlayer {
     return { ok: true, message: "РћС‡РµСЂРµРґСЊ РїРµСЂРµРјРµС€Р°РЅР°." };
   }
 
-  async cycleLoopMode() {
+  async cycleLoopMode(options = {}) {
     if (this.loopMode === "off") this.loopMode = "track";
     else if (this.loopMode === "track") this.loopMode = "queue";
     else this.loopMode = "off";
 
-    await this.refreshPanel();
+    if (options.refresh !== false) {
+      await this.refreshPanel();
+    }
     return this.loopMode;
   }
 

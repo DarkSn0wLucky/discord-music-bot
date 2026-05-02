@@ -1195,7 +1195,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
       clearThinkingTimer();
       progress.stop();
-      console.error("[Command:/play]", error);
+      console.error("[Command:/play]", { query }, error);
       await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`);
     } finally {
       clearThinkingTimer();
@@ -1475,7 +1475,12 @@ async function handleButton(interaction, manager) {
   }
 
   if (interaction.customId === BUTTON_IDS.loop) {
-    await player.cycleLoopMode();
+    const mode = await player.cycleLoopMode({ refresh: false });
+    const message = mode === "off" ? "Цикл выключен." : `Цикл включён: ${loopLabel(mode)}.`;
+    await interaction.followUp({ content: message });
+    setTimeout(() => {
+      player.refreshPanel({ moveToBottom: true }).catch(() => null);
+    }, 5_000);
     return;
   }
 

@@ -12,6 +12,12 @@ const BUTTON_IDS = {
   quickPlay: "music:quickplay",
 };
 
+const SOURCE_EMOJIS = {
+  youtube: "<:youtube:1500272841352941669>",
+  vk: "<:vk:1500272793097601194>",
+  yandex: "<:yandex:150027277754350929>",
+};
+
 function detectSourceKey(track) {
   const raw = `${String(track?.catalogSource || "")} ${String(track?.source || "")}`.toLowerCase();
   if (raw.includes("yandex")) return "yandex";
@@ -25,9 +31,10 @@ function detectSourceKey(track) {
 
 function sourceLabel(track) {
   const key = detectSourceKey(track);
-  if (key === "youtube") return "YouTube";
-  if (key === "yandex") return "Yandex Music";
-  if (key === "vk") return "VK Music";
+  const prefix = SOURCE_EMOJIS[key] ? `${SOURCE_EMOJIS[key]} ` : "";
+  if (key === "youtube") return `${prefix}YouTube`;
+  if (key === "yandex") return `${prefix}Yandex Music`;
+  if (key === "vk") return `${prefix}VK Music`;
   if (key === "soundcloud") return "SoundCloud";
   if (key === "spotify") return "Spotify";
   if (key === "deezer") return "Deezer";
@@ -39,13 +46,7 @@ function buildPlayerEmbed(player) {
     return new EmbedBuilder()
       .setColor(EMBED_COLOR_HEX)
       .setTitle("Музыкальный плеер")
-      .setDescription("Очередь пуста. Включи музыку кнопкой ниже.")
-      .addFields(
-        { name: "Статус", value: "Ожидание", inline: true },
-        { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
-        { name: "В очереди", value: String(player.queue.length), inline: true }
-      )
-      .setFooter({ text: "Режим музыки" });
+      .setDescription("Очередь пуста. Включи музыку кнопкой ниже.");
   }
 
   const track = player.currentTrack;
@@ -95,6 +96,11 @@ function buildControlsRow(player) {
 
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId(BUTTON_IDS.stop)
+      .setLabel("Стоп")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(idle),
+    new ButtonBuilder()
       .setCustomId(BUTTON_IDS.toggle)
       .setLabel(pauseLabel)
       .setStyle(ButtonStyle.Secondary)
@@ -103,11 +109,6 @@ function buildControlsRow(player) {
       .setCustomId(BUTTON_IDS.skip)
       .setLabel("Скип")
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(idle),
-    new ButtonBuilder()
-      .setCustomId(BUTTON_IDS.stop)
-      .setLabel("Стоп")
-      .setStyle(ButtonStyle.Danger)
       .setDisabled(idle),
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.shuffle)
