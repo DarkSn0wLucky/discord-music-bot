@@ -1639,6 +1639,143 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
   };
 }
 
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+
+  return "";
+}
+
+function normalizeCatalogId(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const match = text.match(/\d+/u);
+  return match?.[0] || "";
+}
+
+function yandexCoverUrl(track) {
+  const value = firstNonEmpty(track?.coverUri, track?.ogImage, track?.cover?.uri);
+  if (!value) {
+    return null;
+  }
+
+  if (/^https?:\/\//iu.test(value)) {
+    return value.replace("%%", "200x200");
+  }
+
+  return `https://${value.replace(/^\/+/, "").replace("%%", "200x200")}`;
+}
+
+function getYandexAlbumId(track, fallbackInfo = {}) {
+  const albums = Array.isArray(track?.albums) ? track.albums : [];
+  const firstAlbum = albums[0] || {};
+  return normalizeCatalogId(
+    firstNonEmpty(
+      firstAlbum.id,
+      firstAlbum.albumId,
+      track?.albumId,
+      track?.album?.id,
+      fallbackInfo.albumId
+    )
+  );
+}
+
+function getYandexTrackId(track) {
+  return normalizeCatalogId(firstNonEmpty(track?.id, track?.realId, track?.trackId));
+}
+
+function buildYandexTrackUrl(origin, track, fallbackInfo = {}) {
+  const trackId = getYandexTrackId(track);
+  if (!trackId) {
+    return "";
+  }
+
+  const albumId = getYandexAlbumId(track, fallbackInfo);
+  const baseOrigin = (() => {
+    try {
+      const parsed = new URL(String(origin || ""));
+      return isYandexMusicHost(parsed.hostname) ? parsed.origin : "https://music.yandex.ru";
+    } catch {
+      return "https://music.yandex.ru";
+    }
+  })();
+
+  const pathName = albumId ? `/album/${albumId}/track/${trackId}` : `/track/${trackId}`;
+  return new URL(pathName, baseOrigin).toString();
+}
+
+function toYandexCatalogTrack(rawItem, requestedBy, origin, fallbackInfo = {}) {
+  const track = rawItem?.track || rawItem || {};
+  const title = normalizeMetadataPiece(track?.title || track?.name || "");
+  if (!title) {
+    return null;
+  }
+
+  const artist = joinArtists(track?.artists);
+  const url = buildYandexTrackUrl(origin, track, fallbackInfo);
+  if (!url) {
+    return null;
+  }
+
+  const durationMs = Number(track?.durationMs) || 0;
+  const durationSec = durationMs > 0 ? Math.round(durationMs / 1000) : Number(track?.duration) || 0;
+  const metadata = {
+    title,
+    artist,
+    durationMs: durationMs > 0 ? durationMs : durationSec > 0 ? durationSec * 1000 : 0,
+    durationSec,
+  };
+  const fallbackTrack = buildMetadataFallbackTrack(metadata, requestedBy);
+  const searchQuery = buildQueryFromArtistTitle(artist, title) || title;
+
+  return {
+    title: artist ? `${artist} - ${title}` : title,
+    url,
+    playbackUrl: url,
+    source: "Yandex Music",
+    author: artist || "Yandex Music",
+    views: 0,
+    durationSec,
+    durationMs: metadata.durationMs,
+    thumbnail: yandexCoverUrl(track),
+    requestedById: requestedBy.id,
+    requestedByTag: requestedBy.tag || requestedBy.username,
+    searchQuery,
+    fallbackTracks: fallbackTrack ? [fallbackTrack] : [],
+    catalogSource: "yandex",
+  };
+}
+
+function toYandexCatalogTracks(rawItems, requestedBy, origin, fallbackInfo = {}) {
+  return limitItems(rawItems, MAX_PLAYLIST_ITEMS)
+    .map((item) => {
+      const directTrack = toYandexCatalogTrack(item, requestedBy, origin, fallbackInfo);
+      if (directTrack) {
+        return directTrack;
+      }
+
+      const rawTrack = item?.track || item || {};
+      const durationMs = Number(rawTrack?.durationMs) || 0;
+      return buildMetadataFallbackTrack(
+        {
+          title: rawTrack?.title || rawTrack?.name || "",
+          artist: joinArtists(rawTrack?.artists),
+          durationMs: durationMs > 0 ? durationMs : 0,
+          durationSec: durationMs > 0 ? Math.round(durationMs / 1000) : Number(rawTrack?.duration) || 0,
+        },
+        requestedBy
+      );
+    })
+    .filter((track) => track?.url);
+}
+
 async function resolveTracksFromMetadataItems(items, requestedBy, options = {}) {
   const sourceItems = limitItems(items, MAX_PLAYLIST_ITEMS);
   if (!sourceItems.length) {
@@ -2471,6 +2608,15 @@ async function resolveYandexUrl(url, requestedBy) {
       const playlist = playlistData?.playlist;
       const rawTracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
       if (rawTracks.length > 0) {
+        const directTracks = toYandexCatalogTracks(rawTracks, requestedBy, info.origin, info);
+        if (directTracks.length > 0) {
+          return {
+            tracks: directTracks,
+            kind: "yandex_playlist",
+            title: playlist?.title || "Yandex playlist",
+          };
+        }
+
         const metadata = limitItems(rawTracks, MAX_PLAYLIST_ITEMS)
           .map((item) => {
             const track = item?.track || item || {};
@@ -2674,6 +2820,15 @@ async function resolveYandexUrl(url, requestedBy) {
     const trackMeta = trackData?.track || trackData?.result?.track || null;
 
     if (trackMeta?.title) {
+      const directTrack = toYandexCatalogTrack(trackMeta, requestedBy, info.origin, info);
+      if (directTrack) {
+        return {
+          tracks: [directTrack],
+          kind: "yandex_track",
+          title: trackMeta.title || "Yandex track",
+        };
+      }
+
       const artist = joinArtists(trackMeta.artists);
       const query = buildQueryFromArtistTitle(artist, trackMeta.title);
       const resolvedTrack =
@@ -2719,6 +2874,15 @@ async function resolveYandexUrl(url, requestedBy) {
       }
 
       if (exactTrack?.title) {
+        const directTrack = toYandexCatalogTrack(exactTrack, requestedBy, info.origin, info);
+        if (directTrack) {
+          return {
+            tracks: [directTrack],
+            kind: "yandex_track",
+            title: exactTrack.title || "Yandex track",
+          };
+        }
+
         const query = buildQueryFromArtistTitle(joinArtists(exactTrack.artists), exactTrack.title);
         const resolvedTrack =
           (await resolveTrackByQueryVariants(
@@ -2739,9 +2903,11 @@ async function resolveYandexUrl(url, requestedBy) {
     }
 
     const metadata = [];
+    const rawAlbumTracks = [];
     for (const volume of volumes) {
       const tracks = Array.isArray(volume) ? volume : [];
       for (const track of tracks) {
+        rawAlbumTracks.push(track);
         metadata.push({
           title: track?.title || "",
           artist: joinArtists(track?.artists),
@@ -2749,6 +2915,15 @@ async function resolveYandexUrl(url, requestedBy) {
           durationSec: Number(track?.durationMs) > 0 ? Math.round(Number(track?.durationMs) / 1000) : 0,
         });
       }
+    }
+
+    const directTracks = toYandexCatalogTracks(rawAlbumTracks, requestedBy, info.origin, info);
+    if (directTracks.length > 0) {
+      return {
+        tracks: directTracks,
+        kind: "yandex_album",
+        title: albumData?.title || "Yandex album",
+      };
     }
 
     const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
@@ -2900,34 +3075,52 @@ function normalizeVkEntryUrl(entry, fallbackUrl) {
 
 function toVkTrack(entry, requestedBy, fallbackUrl) {
   const durationSec = Number(entry?.duration) || 0;
+  const url = normalizeVkEntryUrl(entry, fallbackUrl);
+  const author = String(entry?.uploader || entry?.artist || entry?.channel || "VK Music").trim() || "VK Music";
+  const title = String(entry?.title || entry?.track || "VK Music track").trim() || "VK Music track";
+  const metadata = metadataFromExtractorEntry(entry, "") || {
+    artist: author === "VK Music" ? "" : author,
+    title,
+    durationSec,
+    durationMs: durationSec > 0 ? durationSec * 1000 : 0,
+  };
+  const fallbackTrack = buildMetadataFallbackTrack(metadata, requestedBy);
+  const searchQuery = buildQueryFromArtistTitle(metadata.artist, metadata.title) || title;
 
   return {
-    title: String(entry?.title || entry?.track || "VK Music track").trim() || "VK Music track",
-    url: normalizeVkEntryUrl(entry, fallbackUrl),
+    title: author && author !== "VK Music" && !normalizeText(title).includes(normalizeText(author))
+      ? `${author} - ${title}`
+      : title,
+    url,
+    playbackUrl: url,
     source: "VK Music",
-    author: String(entry?.uploader || entry?.artist || entry?.channel || "VK Music").trim() || "VK Music",
+    author,
     views: Number(entry?.view_count) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
     thumbnail: entry?.thumbnail || null,
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
+    searchQuery,
+    fallbackTracks: fallbackTrack ? [fallbackTrack] : [],
+    catalogSource: "vk",
   };
 }
 
 function metadataFromExtractorEntry(entry, sourceLabel = "") {
+  const artist = firstNonEmpty(
+    entry?.artist,
+    entry?.uploader,
+    entry?.channel,
+    entry?.creator,
+    entry?.author
+  );
   const normalized = normalizeMetadataItem(
     {
-      artist:
-        entry?.artist ||
-        entry?.uploader ||
-        entry?.channel ||
-        entry?.creator ||
-        entry?.author ||
-        sourceLabel,
+      artist,
       title: entry?.track || entry?.title || entry?.fulltitle || entry?.alt_title || "",
     },
-    sourceLabel
+    ""
   );
 
   if (!normalized?.title) {
@@ -3201,13 +3394,40 @@ async function resolveVkUrl(url, requestedBy) {
     return null;
   }
 
-  const pathname = String(parsed.pathname || "").toLowerCase();
-  const isDirectVkMusicPage = pathname.startsWith("/music") || pathname.startsWith("/audio");
-  if (isDirectVkMusicPage) {
-    return null;
+  const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
+  const vkJson = await fetchYtDlpJson(url, {
+    timeoutMs: 30_000,
+    cookiesPath,
+    flatPlaylist: false,
+    playlistEnd: MAX_PLAYLIST_ITEMS,
+  }).catch(() => null);
+
+  if (vkJson) {
+    const entries = Array.isArray(vkJson.entries) ? vkJson.entries.filter(Boolean) : [];
+    if (entries.length > 0) {
+      const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
+        .map((entry) => toVkTrack(entry, requestedBy, url))
+        .filter((track) => track?.url);
+
+      if (tracks.length > 0) {
+        return {
+          tracks,
+          kind: "vk_playlist",
+          title: vkJson.title || "VK playlist",
+        };
+      }
+    }
+
+    const singleTrack = toVkTrack(vkJson, requestedBy, url);
+    if (singleTrack?.url) {
+      return {
+        tracks: [singleTrack],
+        kind: "vk_track",
+        title: vkJson.title || "VK track",
+      };
+    }
   }
 
-  const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
   const viaMetadata = await resolveViaYtDlpMetadata(url, requestedBy, {
     sourceLabel: "VK Music",
     cookiesPath,
@@ -3219,40 +3439,6 @@ async function resolveVkUrl(url, requestedBy) {
   });
   if (viaMetadata) {
     return viaMetadata;
-  }
-
-  const vkJson = await fetchYtDlpJson(url, {
-    timeoutMs: 30_000,
-    cookiesPath,
-    flatPlaylist: false,
-  }).catch(() => null);
-
-  if (!vkJson) {
-    return null;
-  }
-
-  const entries = Array.isArray(vkJson.entries) ? vkJson.entries.filter(Boolean) : [];
-  if (entries.length > 0) {
-    const tracks = limitItems(entries, MAX_PLAYLIST_ITEMS)
-      .map((entry) => toVkTrack(entry, requestedBy, url))
-      .filter((track) => track?.url);
-
-    if (tracks.length > 0) {
-      return {
-        tracks,
-        kind: "vk_playlist",
-        title: vkJson.title || "VK playlist",
-      };
-    }
-  }
-
-  const singleTrack = toVkTrack(vkJson, requestedBy, url);
-  if (singleTrack?.url) {
-    return {
-      tracks: [singleTrack],
-      kind: "vk_track",
-      title: vkJson.title || "VK track",
-    };
   }
 
   return null;

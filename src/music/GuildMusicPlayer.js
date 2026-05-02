@@ -12,11 +12,13 @@ const {
 
 const { spawn } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const {
   DEFAULT_VOLUME,
   L2TP_SOURCE_IP,
   MAX_QUEUE_SIZE,
+  YANDEX_COOKIES_PATH,
   VK_COOKIES_PATH,
   YTDLP_BIN,
   YTDLP_COOKIES_PATH,
@@ -31,11 +33,56 @@ const COOKIES_PATH_CACHE_TTL_MS = 30_000;
 const PLAY_START_TIMEOUT_MS = 20_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const ACTION_DEDUPE_WINDOW_MS = 4_000;
+const ENABLE_L2TP_BIND = ["1", "true", "yes", "on", "enabled"].includes(
+  String(process.env.ENABLE_L2TP_BIND || "").trim().toLowerCase()
+);
 const cookiesPathCache = new Map();
+let l2tpAddressChecked = false;
+let l2tpAddressAvailable = false;
+
+function hasLocalAddress(address) {
+  const target = String(address || "").trim();
+  if (!target) {
+    return false;
+  }
+
+  for (const entries of Object.values(os.networkInterfaces())) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (String(entry?.address || "").trim() === target) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function canUseConfiguredL2tpAddress() {
+  if (l2tpAddressChecked) {
+    return l2tpAddressAvailable;
+  }
+
+  l2tpAddressChecked = true;
+  l2tpAddressAvailable = hasLocalAddress(L2TP_SOURCE_IP);
+  if (!l2tpAddressAvailable && String(L2TP_SOURCE_IP || "").trim()) {
+    console.warn(
+      `[Playback] L2TP_SOURCE_IP=${String(L2TP_SOURCE_IP).trim()} не найден на локальных интерфейсах; playback пойдет обычным маршрутом.`
+    );
+  }
+
+  return l2tpAddressAvailable;
+}
+
+function isHomeL2tpPlaybackEnabled() {
+  return ENABLE_L2TP_BIND && Boolean(String(L2TP_SOURCE_IP || "").trim()) && canUseConfiguredL2tpAddress();
+}
 
 function shouldUseHomeL2tpForPlaybackUrl(value) {
-  const sourceIp = String(L2TP_SOURCE_IP || "").trim();
-  if (!sourceIp) {
+  if (!isHomeL2tpPlaybackEnabled()) {
     return false;
   }
 
@@ -70,11 +117,42 @@ function resolveConfiguredCookiesPath(configuredPath) {
 
 function resolveYtDlpCookiesPath(track) {
   const source = String(track?.source || "").toLowerCase();
+  if (source.includes("yandex")) {
+    return resolveConfiguredCookiesPath(YANDEX_COOKIES_PATH) || resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
+  }
+
   if (source.includes("vk")) {
     return resolveConfiguredCookiesPath(VK_COOKIES_PATH) || resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
   }
 
   return resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
+}
+
+function shouldImpersonateBrowserForPlaybackUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "music.yandex.ru" || host.startsWith("music.yandex.") || host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
+  } catch {
+    return false;
+  }
+}
+
+function playbackUrlCatalogKind(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const host = String(parsed.hostname || "").toLowerCase();
+    if (host === "music.yandex.ru" || host.startsWith("music.yandex.")) {
+      return "yandex";
+    }
+    if (host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com")) {
+      return "vk";
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
 }
 
 function isSourceUnavailableError(message) {
@@ -308,6 +386,7 @@ class GuildMusicPlayer {
             throw new Error("Пустой URL источника");
           }
 
+          const catalogKind = playbackUrlCatalogKind(playbackUrl);
           let ytdlpFailed = false;
           let ytdlpErrorText = "";
           let processClosed = false;
@@ -343,8 +422,16 @@ class GuildMusicPlayer {
             }
           }
 
-          if (String(next.source || "").toLowerCase().includes("vk")) {
+          if (catalogKind === "vk" || String(next.source || "").toLowerCase().includes("vk")) {
             ytDlpArgs.push("--referer", "https://vk.com/");
+          }
+
+          if (catalogKind === "yandex") {
+            ytDlpArgs.push("--referer", "https://music.yandex.ru/");
+          }
+
+          if (catalogKind || shouldImpersonateBrowserForPlaybackUrl(playbackUrl)) {
+            ytDlpArgs.push("--impersonate", "chrome");
           }
 
           if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl)) {
