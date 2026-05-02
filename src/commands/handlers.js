@@ -983,7 +983,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
   const memberVoice = interaction.member?.voice?.channel;
   if (!memberVoice) {
-    await interaction.reply({ content: "\u0417\u0430\u0439\u0434\u0438 \u0432 \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043a\u0430\u043d\u0430\u043b \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438 `/play`.", ...EPHEMERAL_REPLY });
+    await interaction.reply({ content: "Зайди в голосовой канал и нажми красную кнопку «Добавить трек» в плеере выше.", ...EPHEMERAL_REPLY });
     return;
   }
 
