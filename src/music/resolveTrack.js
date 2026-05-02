@@ -935,6 +935,10 @@ function joinArtists(artists) {
   }
 
   return artists
+    .filter((artist) => {
+      const name = String(artist?.name || artist || "").trim().toLowerCase();
+      return !artist?.various && name !== "сборник" && name !== "various" && name !== "various artists";
+    })
     .map((artist) => String(artist?.name || artist || "").trim())
     .filter(Boolean)
     .slice(0, 2)
@@ -1734,11 +1738,12 @@ function toYandexCatalogTrack(rawItem, requestedBy, origin, fallbackInfo = {}) {
   };
   const fallbackTrack = buildMetadataFallbackTrack(metadata, requestedBy);
   const searchQuery = buildQueryFromArtistTitle(artist, title) || title;
+  const playbackUrl = fallbackTrack?.playbackUrl || url;
 
   return {
     title: artist ? `${artist} - ${title}` : title,
     url,
-    playbackUrl: url,
+    playbackUrl,
     source: "Yandex Music",
     author: artist || "Yandex Music",
     views: 0,
@@ -2944,6 +2949,8 @@ async function resolveYandexUrl(url, requestedBy) {
     trackKind: "yandex_track",
     playlistTitleFallback: "Yandex playlist",
     trackTitleFallback: "Yandex track",
+    preferSyntheticPlaylist: true,
+    preferSyntheticTrack: true,
   });
   if (ytdlpFallback) {
     return ytdlpFallback;
@@ -3145,6 +3152,8 @@ async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
   const trackKind = String(options.trackKind || "external_track");
   const playlistTitleFallback = String(options.playlistTitleFallback || `${sourceLabel || "External"} playlist`);
   const trackTitleFallback = String(options.trackTitleFallback || `${sourceLabel || "External"} track`);
+  const preferSyntheticPlaylist = options.preferSyntheticPlaylist === true;
+  const preferSyntheticTrack = options.preferSyntheticTrack === true;
 
   const extractorJson = await fetchYtDlpJson(url, {
     timeoutMs,
@@ -3164,6 +3173,19 @@ async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
       .filter((item) => item?.title);
 
     if (metadata.length > 0) {
+      if (preferSyntheticPlaylist) {
+        const fallbackTracks = metadata
+          .map((item) => buildMetadataFallbackTrack(item, requestedBy))
+          .filter((track) => track?.url);
+        if (fallbackTracks.length > 0) {
+          return {
+            tracks: fallbackTracks,
+            kind: playlistKind,
+            title: extractorJson.title || playlistTitleFallback,
+          };
+        }
+      }
+
       const resolvedTracks = await resolveTracksFromMetadataItems(metadata, requestedBy);
       if (resolvedTracks.length > 0) {
         return {
@@ -3186,6 +3208,17 @@ async function resolveViaYtDlpMetadata(url, requestedBy, options = {}) {
   }
 
   const primaryQuery = queries[0];
+  if (preferSyntheticTrack) {
+    const fallbackTrack = buildMetadataFallbackTrack(singleMetadata, requestedBy, primaryQuery);
+    if (fallbackTrack) {
+      return {
+        tracks: [fallbackTrack],
+        kind: trackKind,
+        title: extractorJson.title || singleMetadata.title || trackTitleFallback,
+      };
+    }
+  }
+
   const resolvedTrack =
     (await resolveTrackByQueryVariants(queries, requestedBy).catch(() => null)) ||
     (await resolveTrackByMetadataQuery(primaryQuery, requestedBy).catch(() => null));
@@ -3320,10 +3353,6 @@ function fetchYtDlpJson(url, options = {}) {
       }
     }
 
-    if (isVkTarget || isYandexTarget) {
-      args.push("--impersonate", "chrome");
-    }
-
     if (isVkTarget) {
       args.push("--referer", "https://vk.com/");
     }
@@ -3436,6 +3465,8 @@ async function resolveVkUrl(url, requestedBy) {
     trackKind: "vk_track",
     playlistTitleFallback: "VK playlist",
     trackTitleFallback: "VK track",
+    preferSyntheticPlaylist: true,
+    preferSyntheticTrack: true,
   });
   if (viaMetadata) {
     return viaMetadata;

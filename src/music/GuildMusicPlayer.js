@@ -115,7 +115,26 @@ function resolveConfiguredCookiesPath(configuredPath) {
   return resolvedPath;
 }
 
-function resolveYtDlpCookiesPath(track) {
+function isYouTubePlaybackUrl(value) {
+  const text = String(value || "").trim();
+  if (text.toLowerCase().startsWith("ytsearch")) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(text);
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "youtu.be" || host === "www.youtube.com" || host === "youtube.com" || host.endsWith(".youtube.com");
+  } catch {
+    return false;
+  }
+}
+
+function resolveYtDlpCookiesPath(track, playbackUrl = "") {
+  if (isYouTubePlaybackUrl(playbackUrl)) {
+    return resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
+  }
+
   const source = String(track?.source || "").toLowerCase();
   if (source.includes("yandex")) {
     return resolveConfiguredCookiesPath(YANDEX_COOKIES_PATH) || resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
@@ -126,16 +145,6 @@ function resolveYtDlpCookiesPath(track) {
   }
 
   return resolveConfiguredCookiesPath(YTDLP_COOKIES_PATH);
-}
-
-function shouldImpersonateBrowserForPlaybackUrl(value) {
-  try {
-    const parsed = new URL(String(value || "").trim());
-    const host = String(parsed.hostname || "").toLowerCase();
-    return host === "music.yandex.ru" || host.startsWith("music.yandex.") || host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
-  } catch {
-    return false;
-  }
 }
 
 function playbackUrlCatalogKind(value) {
@@ -394,7 +403,7 @@ class GuildMusicPlayer {
           let failedBeforePlaying = false;
           let hasStartedPlaying = false;
           let playingStartedAt = null;
-          const cookiesPath = resolveYtDlpCookiesPath(next);
+          const cookiesPath = resolveYtDlpCookiesPath(next, playbackUrl);
           const isYouTubeLike =
             /(?:youtube\.com|youtu\.be)/i.test(playbackUrl) ||
             String(next.source || "").toLowerCase().includes("youtube");
@@ -428,10 +437,6 @@ class GuildMusicPlayer {
 
           if (catalogKind === "yandex") {
             ytDlpArgs.push("--referer", "https://music.yandex.ru/");
-          }
-
-          if (catalogKind || shouldImpersonateBrowserForPlaybackUrl(playbackUrl)) {
-            ytDlpArgs.push("--impersonate", "chrome");
           }
 
           if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl)) {
