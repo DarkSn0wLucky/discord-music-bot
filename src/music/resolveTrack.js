@@ -2274,9 +2274,33 @@ async function fetchJsonWithTimeout(url) {
   }
 }
 
-function parseYandexPlaylistTargetFromHtml(html) {
+function parseYandexPlaylistTargetFromHtml(html, expectedUuid = "") {
   const source = String(html || "");
   if (!source) {
+    return null;
+  }
+
+  const uuid = String(expectedUuid || "").trim();
+  if (uuid) {
+    const escapedUuid = escapeRegExp(uuid);
+    const uuidPatterns = [
+      new RegExp(
+        `"uuid"\\s*:\\s*"${escapedUuid}"[\\s\\S]{0,5000}?"uid"\\s*:\\s*"?(\\d+)"?[\\s\\S]{0,1200}?"kind"\\s*:\\s*"?(\\d+)"?`,
+        "i"
+      ),
+      new RegExp(
+        `"uid"\\s*:\\s*"?(\\d+)"?[\\s\\S]{0,1200}?"kind"\\s*:\\s*"?(\\d+)"?[\\s\\S]{0,5000}?"uuid"\\s*:\\s*"${escapedUuid}"`,
+        "i"
+      ),
+    ];
+
+    for (const pattern of uuidPatterns) {
+      const match = source.match(pattern);
+      if (match?.[1] && match?.[2]) {
+        return parseYandexOwnerKindPair(match[1], match[2]);
+      }
+    }
+
     return null;
   }
 
@@ -2444,7 +2468,7 @@ async function resolveYandexPlaylistTarget(info, originalUrl) {
     }
   })();
 
-  const resolvedTarget = parseYandexPlaylistTargetFromHtml(response.body);
+  const resolvedTarget = parseYandexPlaylistTargetFromHtml(response.body, info?.playlistUuid || "");
   const preferredTarget = pickPreferredYandexPlaylistTarget(resolvedTarget, finalTarget, hintTarget, directTarget);
   if (preferredTarget?.owner && preferredTarget?.kind && info.playlistUuid) {
     yandexPlaylistHintMap.set(String(info.playlistUuid).toLowerCase(), {
