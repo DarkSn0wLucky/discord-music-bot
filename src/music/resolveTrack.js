@@ -45,6 +45,8 @@ const VK_RELOAD_AUDIO_CHUNK_DELAY_MS = 250;
 const VK_RELOAD_AUDIO_CACHE_TTL_MS = 15 * 60 * 1000;
 const VK_HTML_RESOLVE_RETRIES = 2;
 const VK_HTML_RESOLVE_RETRY_DELAY_MS = 2_000;
+const VK_LOAD_SECTION_RETRIES = 2;
+const VK_LOAD_SECTION_RETRY_DELAY_MS = 700;
 const NETWORK_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const YANDEX_REGION_CHECK_CACHE_TTL_MS = 5 * 60 * 1000;
 const COOKIES_FILE_CACHE_TTL_MS = 30 * 1000;
@@ -282,6 +284,22 @@ function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
   }
 
   return [...map.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+function hasVkAuthenticatedCookies(cookiesPath) {
+  const absolutePath = resolveExistingFilePath(cookiesPath);
+  if (!absolutePath) {
+    return false;
+  }
+
+  return readCookiesFromFile(absolutePath).some((cookie) => {
+    const name = String(cookie?.name || "").trim().toLowerCase();
+    if (!hostMatchesCookieDomain("vk.com", cookie?.domain, cookie?.includeSubdomains)) {
+      return false;
+    }
+
+    return name === "remixsid" || name === "remixsid6" || name === "remixsslsid";
+  });
 }
 
 function limitItems(list, limit) {
@@ -3297,6 +3315,55 @@ function collectVkAudioPayloadItems(payload) {
   return payload.flatMap((item) => collectVkAudioPayloadItems(item));
 }
 
+function isVkAudioPayloadObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const ownerId = firstNonEmpty(value.owner_id, value.ownerId, value.owner, value.oid);
+  const id = firstNonEmpty(value.id, value.audio_id, value.audioId);
+  const hasMediaFields = Boolean(
+    firstNonEmpty(value.url, value.src, value.mp3, value.hashes, value.hash, value.title, value.track)
+  );
+  return Boolean(ownerId && id && hasMediaFields);
+}
+
+function collectVkAudioPayloadItemsDeep(value, seen = new WeakSet()) {
+  if (!value) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    const text = decodeHtmlEntities(value);
+    const items = extractVkAudioPayloadItemsFromHtml(text);
+    const parsed = parseJsonPayload(text);
+    return parsed ? [...items, ...collectVkAudioPayloadItemsDeep(parsed, seen)] : items;
+  }
+
+  if (isVkAudioFieldArray(value)) {
+    return [value];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectVkAudioPayloadItemsDeep(item, seen));
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  if (seen.has(value)) {
+    return [];
+  }
+  seen.add(value);
+
+  if (isVkAudioPayloadObject(value)) {
+    return [value];
+  }
+
+  return Object.values(value).flatMap((item) => collectVkAudioPayloadItemsDeep(item, seen));
+}
+
 function firstVkCoverUrl(value) {
   const text = firstNonEmpty(value);
   if (!text) {
@@ -3712,8 +3779,8 @@ function parseVkPlaylistInfoFromUrl(value) {
 
     for (const text of texts) {
       const match =
-        text.match(/\/music\/playlist\/(-?\d+)_(\d+)(?:_([\da-f]+))?/iu) ||
-        text.match(/audio_playlist(-?\d+)_(\d+)(?:[\/_]([\da-f]+))?/iu);
+        text.match(/\/music\/playlist\/(-?\d+)_(\d+)(?:_([^/?&#]+))?/iu) ||
+        text.match(/audio_playlist(-?\d+)_(\d+)(?:[\/_]([^/?&#]+))?/iu);
       if (!match?.[1] || !match?.[2]) {
         continue;
       }
@@ -3722,7 +3789,7 @@ function parseVkPlaylistInfoFromUrl(value) {
         ownerId: match[1],
         playlistId: match[2],
         accessHash:
-          match[3] ||
+          safeDecodeURIComponent(match[3] || "") ||
           parsed.searchParams.get("api_view") ||
           parsed.searchParams.get("access_hash") ||
           parsed.searchParams.get("hash") ||
@@ -3736,7 +3803,7 @@ function parseVkPlaylistInfoFromUrl(value) {
   }
 }
 
-function buildVkMobilePlaylistUrl(info, offset = 0) {
+function buildVkMobilePlaylistUrl(info, offset = 0, hashParam = "api_view") {
   if (!info?.ownerId || !info?.playlistId) {
     return "";
   }
@@ -3744,7 +3811,7 @@ function buildVkMobilePlaylistUrl(info, offset = 0) {
   const mobileUrl = new URL("https://m.vk.com/audio");
   mobileUrl.searchParams.set("act", `audio_playlist${info.ownerId}_${info.playlistId}`);
   if (info.accessHash) {
-    mobileUrl.searchParams.set("api_view", info.accessHash);
+    mobileUrl.searchParams.set(hashParam || "api_view", info.accessHash);
   }
   if (Number(offset) > 0) {
     mobileUrl.searchParams.set("from", `/audio?act=audio_playlists${info.ownerId}`);
@@ -3764,6 +3831,15 @@ function buildVkHtmlFetchUrls(url) {
   const mobileUrlText = buildVkMobilePlaylistUrl(info);
   if (!urls.includes(mobileUrlText)) {
     urls.push(mobileUrlText);
+  }
+
+  if (info.accessHash) {
+    for (const hashParam of ["access_hash", "hash"]) {
+      const hashUrlText = buildVkMobilePlaylistUrl(info, 0, hashParam);
+      if (hashUrlText && !urls.includes(hashUrlText)) {
+        urls.push(hashUrlText);
+      }
+    }
   }
 
   return urls;
@@ -3877,17 +3953,158 @@ async function fetchVkHtmlPage(url, cookiesPath) {
   }).catch(() => null);
 }
 
-async function resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath) {
-  const pages = await fetchVkPlaylistHtmlPages(url, cookiesPath);
-  if (pages.length === 0) {
+function firstVkSectionValueByKey(value, keys, seen = new WeakSet()) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  if (seen.has(value)) {
+    return "";
+  }
+  seen.add(value);
+
+  if (!Array.isArray(value)) {
+    for (const key of keys) {
+      const direct = value[key];
+      if (direct !== undefined && direct !== null && String(direct).trim()) {
+        return direct;
+      }
+    }
+  }
+
+  const entries = Array.isArray(value) ? value : Object.values(value);
+  for (const item of entries) {
+    const nested = firstVkSectionValueByKey(item, keys, seen);
+    if (nested !== "") {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+function numberVkSectionValueByKey(value, keys) {
+  const raw = firstVkSectionValueByKey(value, keys);
+  const number = Number(raw);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+}
+
+async function fetchVkPlaylistSectionItems(playlistInfo, cookiesPath, sourceUrl) {
+  if (!playlistInfo?.ownerId || !playlistInfo?.playlistId) {
     return null;
   }
 
-  const playlistInfo = parseVkPlaylistInfoFromUrl(url);
   const payloadItems = [];
   let title = "";
   let totalItems = 0;
-  let sourceUrl = "";
+  let offset = 0;
+  const seenOffsets = new Set();
+  const maxPages = hasFinitePlaylistLimit()
+    ? Math.max(2, Math.ceil(MAX_PLAYLIST_ITEMS / 100) + 2)
+    : 50;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    if (seenOffsets.has(offset)) {
+      break;
+    }
+    seenOffsets.add(offset);
+
+    let parsed = null;
+    for (let attempt = 0; attempt <= VK_LOAD_SECTION_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        await delayMs(VK_LOAD_SECTION_RETRY_DELAY_MS * attempt);
+      }
+
+      const body = new URLSearchParams({
+        act: "load_section",
+        owner_id: String(playlistInfo.ownerId),
+        playlist_id: String(playlistInfo.playlistId),
+        type: "playlist",
+        offset: String(offset),
+        is_loading_all: "1",
+        al: "1",
+      });
+      if (playlistInfo.accessHash) {
+        body.set("access_hash", String(playlistInfo.accessHash));
+      }
+
+      const response = await requestTextWithRedirect("https://m.vk.com/audio", {
+        method: "POST",
+        body: body.toString(),
+        timeoutMs: 20_000,
+        cookiesPath,
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+          accept: "application/json,text/plain,*/*",
+          "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "x-requested-with": "XMLHttpRequest",
+          origin: "https://m.vk.com",
+          referer: sourceUrl || buildVkMobilePlaylistUrl(playlistInfo) || "https://m.vk.com/audio",
+        },
+      }).catch(() => null);
+
+      if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+        continue;
+      }
+
+      parsed = parseJsonPayload(String(response.body || "").replace(/^<!--\s*/u, ""));
+      if (parsed) {
+        break;
+      }
+    }
+
+    if (!parsed) {
+      break;
+    }
+
+    const pageItems = collectVkAudioPayloadItemsDeep(parsed);
+    if (pageItems.length === 0) {
+      break;
+    }
+
+    payloadItems.push(...pageItems);
+    if (!title) {
+      title = String(firstVkSectionValueByKey(parsed, ["title", "name"]) || "").trim();
+    }
+    totalItems = Math.max(totalItems, numberVkSectionValueByKey(parsed, ["totalCount", "total_count", "count"]));
+
+    const nextOffset = numberVkSectionValueByKey(parsed, ["nextOffset", "next_offset", "nextFrom", "next_from"]);
+    if (!nextOffset || nextOffset <= offset) {
+      break;
+    }
+    offset = nextOffset;
+
+    if (hasFinitePlaylistLimit() && payloadItems.length >= MAX_PLAYLIST_ITEMS) {
+      break;
+    }
+  }
+
+  if (payloadItems.length === 0) {
+    return null;
+  }
+
+  return {
+    payloadItems: applyPlaylistLimit(payloadItems),
+    title,
+    totalItems,
+    sourceUrl: buildVkMobilePlaylistUrl(playlistInfo) || sourceUrl || "https://m.vk.com/audio",
+  };
+}
+
+async function resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath) {
+  const playlistInfo = parseVkPlaylistInfoFromUrl(url);
+  const sectionData = playlistInfo ? await fetchVkPlaylistSectionItems(playlistInfo, cookiesPath, url) : null;
+  const pages = await fetchVkPlaylistHtmlPages(url, cookiesPath);
+  if (pages.length === 0 && !sectionData?.payloadItems?.length) {
+    return null;
+  }
+
+  const payloadItems = Array.isArray(sectionData?.payloadItems) ? [...sectionData.payloadItems] : [];
+  let title = String(sectionData?.title || "").trim();
+  let totalItems = Number(sectionData?.totalItems) || 0;
+  let sourceUrl = String(sectionData?.sourceUrl || "");
 
   for (const page of pages) {
     const response = page.response;
@@ -4742,8 +4959,12 @@ async function resolveTracks(query, requestedBy) {
     }
 
     if (isVkMusicUrl) {
+      const vkCookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
+      const cookieHint = hasVkAuthenticatedCookies(vkCookiesPath)
+        ? "Проверь, что VK cookies файл (VK_COOKIES_PATH) свежий и у аккаунта есть доступ к этому плейлисту."
+        : "В VK_COOKIES_PATH нет авторизационных cookies VK (remixsid/remixsid6). Обнови cookies из залогиненного VK аккаунта, иначе закрытые и часть расшаренных плейлистов VK не отдаются.";
       throw new Error(
-        "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443 \u043a\u0430\u043a \u043f\u0440\u044f\u043c\u043e\u0439 VK-\u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a. YouTube fallback \u0434\u043b\u044f VK \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d, \u0447\u0442\u043e\u0431\u044b \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0442\u044c \u0441\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0435 \u0442\u0440\u0435\u043a\u0438. \u041f\u0440\u043e\u0432\u0435\u0440\u044c VK cookies \u0444\u0430\u0439\u043b (VK_COOKIES_PATH)."
+        `\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443 \u043a\u0430\u043a \u043f\u0440\u044f\u043c\u043e\u0439 VK-\u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a. YouTube fallback \u0434\u043b\u044f VK \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d, \u0447\u0442\u043e\u0431\u044b \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0442\u044c \u0441\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0435 \u0442\u0440\u0435\u043a\u0438. ${cookieHint}`
       );
     }
 
@@ -4764,5 +4985,3 @@ module.exports = {
   resolveTracks,
   resolveSearchCandidates,
 };
-
-
