@@ -51,7 +51,10 @@ function buildPlayerEmbed(player) {
 
   const track = player.currentTrack;
   const playbackDurationMs = Number(player.player?.state?.resource?.playbackDuration) || 0;
-  const elapsedMs = track.startedAt ? Math.max(0, Date.now() - track.startedAt) : Math.max(0, playbackDurationMs);
+  const playbackStatus = String(player.player?.state?.status || "");
+  const isStarting = !track.startedAt;
+  const fallbackElapsedMs = track.startedAt ? Math.max(0, Date.now() - track.startedAt) : 0;
+  const elapsedMs = isStarting ? 0 : playbackDurationMs > 0 ? Math.max(0, playbackDurationMs) : fallbackElapsedMs;
   const durationMsRaw =
     Number(track.durationMs) > 0
       ? Number(track.durationMs)
@@ -59,10 +62,21 @@ function buildPlayerEmbed(player) {
         ? Number(track.durationSec) * 1000
         : 0;
   const durationMs = Math.max(0, durationMsRaw);
+  const loadingStartedAt = Number(track.loadingStartedAt || player.transitionStartedAt || 0);
+  const loadingElapsedMs = loadingStartedAt > 0 ? Math.max(0, Date.now() - loadingStartedAt) : 0;
+  const loadingProgressMs = Math.min(loadingElapsedMs, 9_000);
+  const barElapsedMs =
+    !isStarting && playbackStatus === "playing" && durationMs > 0
+      ? Math.min(elapsedMs, Math.max(0, durationMs - 1))
+      : elapsedMs;
+  const displayElapsedMs =
+    !isStarting && playbackStatus === "playing" && durationMs > 0 ? Math.min(elapsedMs, durationMs) : elapsedMs;
   const durationText =
-    durationMs > 0
-      ? `${formatDuration(elapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`
-      : `${formatDuration(elapsedMs / 1000)} / --:--`;
+    isStarting
+      ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}`
+      : durationMs > 0
+      ? `${formatDuration(displayElapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`
+      : `${formatDuration(displayElapsedMs / 1000)} / --:--`;
 
   const queuePreview =
     player.queue
@@ -76,7 +90,10 @@ function buildPlayerEmbed(player) {
     .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
     .addFields(
       { name: "Источник", value: sourceLabel(track) },
-      { name: "TIME", value: `${progressBar(elapsedMs, durationMs, 34)}\n${durationText}` },
+      {
+        name: "TIME",
+        value: `${isStarting ? progressBar(loadingProgressMs, 10_000, 34) : progressBar(barElapsedMs, durationMs, 34)}\n${durationText}`,
+      },
       { name: "Дальше в очереди", value: queuePreview }
     );
 

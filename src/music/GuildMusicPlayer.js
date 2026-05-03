@@ -33,6 +33,8 @@ const COOKIES_PATH_CACHE_TTL_MS = 30_000;
 const PLAY_START_TIMEOUT_MS = 20_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const ACTION_DEDUPE_WINDOW_MS = 4_000;
+const PLAYBACK_PANEL_UPDATE_MS = 2_000;
+const STARTING_PANEL_UPDATE_MS = 1_000;
 const ENABLE_L2TP_BIND = ["1", "true", "yes", "on", "enabled"].includes(
   String(process.env.ENABLE_L2TP_BIND || "").trim().toLowerCase()
 );
@@ -242,6 +244,7 @@ class GuildMusicPlayer {
     this.suppressNextTrackAction = false;
     this.preservePanelOnNextTrack = false;
     this.transitionLock = false;
+    this.transitionStartedAt = null;
     this.textChannelId = null;
     this.panelMessageId = null;
     this.voiceChannelId = null;
@@ -393,7 +396,10 @@ class GuildMusicPlayer {
     try {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
-        this.currentTrack = { ...next, startedAt: null };
+        this.transitionStartedAt = Date.now();
+        this.currentTrack = { ...next, startedAt: null, loadingStartedAt: this.transitionStartedAt };
+        await this.refreshPanel();
+        this.startProgressUpdater();
 
         try {
           console.log(`[Play] Р—Р°РїСѓСЃРє С‚СЂРµРєР°: ${next.title} | ${next.url}`);
@@ -589,7 +595,9 @@ class GuildMusicPlayer {
 
           if (this.currentTrack) {
             this.currentTrack.startedAt = playingStartedAt || Date.now();
+            this.currentTrack.loadingStartedAt = null;
           }
+          this.transitionStartedAt = null;
 
           if (!preservePanelMessage) {
             await this.clearPanel();
@@ -605,6 +613,7 @@ class GuildMusicPlayer {
           console.error(`[Play Error] ${next.title}: ${error.message}`);
           this.cleanupActiveStreamProcess();
           this.currentTrack = null;
+          this.transitionStartedAt = null;
           const retryAttempt = Number(next.retryAttempt || 0);
           const canRetry = Number.isFinite(retryAttempt) && retryAttempt < MAX_SOURCE_RETRIES_PER_TRACK;
 
@@ -687,10 +696,14 @@ class GuildMusicPlayer {
       }
 
       this.currentTrack = null;
+      this.transitionStartedAt = null;
       await this.refreshPanel({ moveToBottom: true });
       this.scheduleAutoDisconnect();
     } finally {
       this.transitionLock = false;
+      if (!this.currentTrack?.startedAt) {
+        this.transitionStartedAt = null;
+      }
     }
   }
 
@@ -777,12 +790,13 @@ class GuildMusicPlayer {
       return { ok: false, message: "РЎРµР№С‡Р°СЃ РЅРµС‡РµРіРѕ СЃРєРёРїР°С‚СЊ." };
     }
 
+    const skippedTrack = this.currentTrack;
     this.suppressNextTrackAction = true;
     this.preservePanelOnNextTrack = true;
     this.forceSkip = true;
     this.cleanupActiveStreamProcess();
     this.player.stop(true);
-    return { ok: true, message: "РўСЂРµРє РїСЂРѕРїСѓС‰РµРЅ." };
+    return { ok: true, message: "Трек пропущен.", track: skippedTrack };
   }
 
   async playQueueIndex(index) {
@@ -1094,25 +1108,30 @@ class GuildMusicPlayer {
 
   startProgressUpdater() {
     this.stopProgressUpdater();
-    if (!this.currentTrack?.startedAt) return;
+    if (!this.currentTrack) return;
+
+    const isStarting = !this.currentTrack.startedAt;
+    const intervalMs = isStarting ? STARTING_PANEL_UPDATE_MS : PLAYBACK_PANEL_UPDATE_MS;
 
     const tick = async () => {
-      if (this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing) {
+      const isStartingTrack = this.currentTrack && !this.currentTrack.startedAt && this.transitionLock;
+      const isPlayingTrack = this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing;
+      if (isStartingTrack || isPlayingTrack) {
         await this.refreshPanel().catch(() => {});
       } else {
         this.stopProgressUpdater();
       }
     };
 
-    const elapsed = Math.max(0, Date.now() - this.currentTrack.startedAt);
-    const remainder = elapsed % 5000;
-    const delay = remainder === 0 ? 5000 : 5000 - remainder;
+    const elapsed = this.currentTrack.startedAt ? Math.max(0, Date.now() - this.currentTrack.startedAt) : 0;
+    const remainder = elapsed % intervalMs;
+    const delay = isStarting ? intervalMs : remainder === 0 ? intervalMs : intervalMs - remainder;
 
     this.updateTimeout = setTimeout(() => {
       tick().catch(() => {});
       this.updateInterval = setInterval(() => {
         tick().catch(() => {});
-      }, 5000);
+      }, intervalMs);
     }, delay);
   }
 

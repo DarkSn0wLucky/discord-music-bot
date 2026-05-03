@@ -29,14 +29,17 @@ function safeLinkText(text) {
 }
 
 function progressBar(elapsedMs, totalMs, size = 14) {
+  const safeSize = Math.max(2, Number(size) || 14);
   if (!Number.isFinite(totalMs) || totalMs <= 0) {
-    const safeSize = Math.max(2, Number(size) || 14);
     return `o${"-".repeat(safeSize - 1)}`;
   }
 
   const ratio = Math.max(0, Math.min(1, elapsedMs / totalMs));
-  const markerIndex = Math.max(0, Math.min(size - 1, Math.round(ratio * (size - 1))));
-  const bar = Array.from({ length: size }, (_, index) => {
+  const markerIndex =
+    elapsedMs >= totalMs
+      ? safeSize - 1
+      : Math.max(0, Math.min(safeSize - 1, Math.floor(ratio * (safeSize - 1))));
+  const bar = Array.from({ length: safeSize }, (_, index) => {
     if (index === markerIndex) {
       return "o";
     }

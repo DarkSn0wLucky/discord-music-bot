@@ -310,6 +310,25 @@ async function showQuickPlayModal(interaction) {
   await interaction.showModal(modal);
 }
 
+function interactionUserMention(interaction) {
+  return interaction?.user?.id ? `<@${interaction.user.id}>` : safeLinkText(interaction?.user?.tag || "unknown");
+}
+
+function buildSkipNotice(result, interaction) {
+  const actor = interactionUserMention(interaction);
+  const title = result?.track?.title ? `**${safeLinkText(result.track.title)}**\n` : "";
+  return `${title}Пропустил ${actor}`;
+}
+
+function buildLoopNotice(mode, interaction) {
+  const actor = interactionUserMention(interaction);
+  if (mode === "off") {
+    return `Цикл выключен.\nВыключил ${actor}`;
+  }
+
+  return `Цикл включён: ${loopLabel(mode)}.\nВключил ${actor}`;
+}
+
 function startUrlResolveHeartbeat(progress) {
   let stopped = false;
   let percent = 30;
@@ -1229,6 +1248,12 @@ async function handleSkip(interaction, manager) {
   const result = await player.skip();
   if (result.ok) {
     await interaction.deleteReply().catch(() => null);
+    await interaction
+      .followUp({
+        embeds: [buildActionEmbed("Скип", buildSkipNotice(result, interaction))],
+        allowedMentions: { users: [interaction.user.id] },
+      })
+      .catch(() => null);
     return;
   }
 
@@ -1455,7 +1480,14 @@ async function handleButton(interaction, manager) {
     const result = await player.skip();
     if (!result.ok) {
       await interaction.followUp({ content: result.message, ...EPHEMERAL_REPLY });
+      return;
     }
+    await interaction
+      .followUp({
+        embeds: [buildActionEmbed("Скип", buildSkipNotice(result, interaction))],
+        allowedMentions: { users: [interaction.user.id] },
+      })
+      .catch(() => null);
     return;
   }
 
@@ -1478,9 +1510,13 @@ async function handleButton(interaction, manager) {
   }
 
   if (interaction.customId === BUTTON_IDS.loop) {
-    const mode = await player.cycleLoopMode({ refresh: false });
-    const message = mode === "off" ? "Цикл выключен." : `Цикл включён: ${loopLabel(mode)}.`;
-    await interaction.followUp({ content: message });
+    const mode = await player.cycleLoopMode();
+    await interaction
+      .followUp({
+        embeds: [buildActionEmbed("Цикл", buildLoopNotice(mode, interaction))],
+        allowedMentions: { users: [interaction.user.id] },
+      })
+      .catch(() => null);
     setTimeout(() => {
       player.refreshPanel({ moveToBottom: true }).catch(() => null);
     }, 5_000);
