@@ -120,12 +120,33 @@ function trackTitleLine(track, maxLength = 90) {
   return markdownLink(title, trackDisplayUrl(track));
 }
 
+function trackTitleText(track, maxLength = 90) {
+  return truncate(compactTitle(track), maxLength) || "Без названия";
+}
+
+function setTrackTitle(embed, track, maxLength = 90) {
+  embed.setTitle(trackTitleText(track, maxLength));
+  const url = trackDisplayUrl(track);
+  if (url) {
+    embed.setURL(url);
+  }
+  return embed;
+}
+
 function trackAuthorLine(track, maxLength = 90) {
   const author = truncate(safeLinkText(track?.artist || track?.author || track?.source || ""), maxLength);
   if (!author) {
     return "";
   }
   return markdownLink(author, authorDisplayUrl(track));
+}
+
+function trackRequesterMention(track) {
+  if (track?.requestedById) {
+    return `<@${track.requestedById}>`;
+  }
+
+  return compactActorLabel(firstText(track?.requestedByDisplayName, track?.requestedByTag, track?.requestedById, "unknown"));
 }
 
 function compactActorLabel(value) {
@@ -229,34 +250,28 @@ function buildPlayerEmbed(player) {
       : elapsedMs;
   const displayElapsedMs =
     !isStarting && playbackStatus === "playing" && durationMs > 0 ? Math.min(elapsedMs, durationMs) : elapsedMs;
-  const trackLine = trackTitleLine(track, 54);
   const authorLine = trackAuthorLine(track, 46);
-  const requestedByFooter = buildActorFooter("Добавил", "", track);
+  const requestedBy = trackRequesterMention(track);
   const progressLine = isStarting
     ? visualProgressBar(loadingProgressMs, 10_000, 18)
     : visualProgressBar(barElapsedMs, durationMs, 18);
   const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(displayElapsedMs / 1000);
   const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
-  const description = [
-    trackLine,
-    authorLine,
-  ].filter(Boolean).join("\n");
-
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
-    .setTitle("Сейчас играет")
-    .setDescription(description)
+    .setAuthor({ name: "Сейчас играет" })
     .addFields(
       { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
       { name: "Дальше в очереди", value: buildQueuePreview(player) },
-      { name: "Источник", value: `${sourceLabel(track)} · Треков в очереди: ${player.queue.length}` }
+      { name: "Источник", value: `${sourceLabel(track)} · Очередь: ${player.queue.length}\nДобавил ${requestedBy}` }
     );
+  setTrackTitle(embed, track, 54);
+  if (authorLine) {
+    embed.setDescription(authorLine);
+  }
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);
-  }
-  if (requestedByFooter) {
-    embed.setFooter({ text: requestedByFooter });
   }
 
   return embed;
@@ -265,16 +280,18 @@ function buildPlayerEmbed(player) {
 function buildTrackNoticeEmbed(title, track, options = {}) {
   const actorText = String(options.actorText || "").trim();
   const actionText = String(options.actionText || "").trim();
-  const footerText = String(options.footerText || buildActorFooter(actionText, actorText, track)).trim();
   const durationSec = Number(track?.durationSec) || 0;
   const authorLine = trackAuthorLine(track, 46);
-  const lines = [trackTitleLine(track, 48)];
+  const lines = [];
 
   if (authorLine) {
     lines.push(authorLine);
   }
 
   if (durationSec > 0) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
     lines.push("**Длительность**", formatDuration(durationSec));
   }
 
@@ -284,16 +301,22 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
       lines.push(extraText);
     }
   }
+  if (actionText || actorText) {
+    const actorLine = `${actionText || "Запросил"} ${actorText}`.trim();
+    if (actorLine) {
+      lines.push(actorLine);
+    }
+  }
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
-    .setTitle(title)
-    .setDescription(lines.join("\n"))
+    .setAuthor({ name: title })
     .setTimestamp(new Date());
-
-  if (footerText) {
-    embed.setFooter({ text: footerText });
+  setTrackTitle(embed, track, 48);
+  if (lines.length > 0) {
+    embed.setDescription(lines.join("\n"));
   }
+
   if (track?.thumbnail) {
     embed.setThumbnail(track.thumbnail);
   }
