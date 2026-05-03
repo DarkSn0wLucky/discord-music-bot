@@ -239,6 +239,17 @@ function hostMatchesCookieDomain(hostname, domain, includeSubdomains) {
   return false;
 }
 
+function shouldSendCookieToHost(hostname, cookie) {
+  if (hostMatchesCookieDomain(hostname, cookie?.domain, cookie?.includeSubdomains)) {
+    return true;
+  }
+
+  const host = String(hostname || "").toLowerCase();
+  const domain = normalizeCookieDomain(cookie?.domain);
+  const name = String(cookie?.name || "").trim().toLowerCase();
+  return domain === "vk.com" && host.endsWith(".vk.com") && name === "remixnsid";
+}
+
 function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
   let parsed;
   try {
@@ -263,7 +274,7 @@ function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
   const map = new Map();
 
   for (const cookie of cookies) {
-    if (!hostMatchesCookieDomain(host, cookie.domain, cookie.includeSubdomains)) {
+    if (!shouldSendCookieToHost(host, cookie)) {
       continue;
     }
 
