@@ -5,7 +5,7 @@ const { buildPanelComponents, buildPlayerEmbed } = require("../ui/panel");
 const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
-const IDLE_PANEL_BUMP_MS = 5 * 60_000;
+const IDLE_PANEL_BUMP_AFTER_MESSAGE_MS = 60_000;
 const QUICKPLAY_BUTTON_ID = "music:quickplay";
 
 function normalizeChannelName(value) {
@@ -20,6 +20,7 @@ class MusicManager {
     this.client = client;
     this.players = new Map();
     this.idlePanelBumpTimer = null;
+    this.idlePanelBumpTimeouts = new Map();
   }
 
   get(guildId) {
@@ -202,11 +203,50 @@ class MusicManager {
     }
   }
 
-  startIdlePanelBumpTask(intervalMs = IDLE_PANEL_BUMP_MS) {
+  scheduleIdlePanelBumpAfterMessage(message, delayMs = IDLE_PANEL_BUMP_AFTER_MESSAGE_MS) {
+    if (!message?.guild || !message.channel?.isTextBased?.()) {
+      return;
+    }
+
+    if (MUSIC_TEXT_CHANNEL_ID) {
+      if (message.channel.id !== MUSIC_TEXT_CHANNEL_ID) {
+        return;
+      }
+    } else {
+      const expected = normalizeChannelName(MUSIC_TEXT_CHANNEL_NAME || DEFAULT_MUSIC_CHANNEL_NAME);
+      const current = normalizeChannelName(message.channel.name || "");
+      if (expected && !current.startsWith(expected)) {
+        return;
+      }
+    }
+
+    if (this.isMusicPanelMessage(message)) {
+      return;
+    }
+
+    const guild = message.guild;
+    const waitMs = Math.max(60_000, Number(delayMs) || IDLE_PANEL_BUMP_AFTER_MESSAGE_MS);
+
+    if (this.idlePanelBumpTimeouts.has(guild.id)) {
+      clearTimeout(this.idlePanelBumpTimeouts.get(guild.id));
+    }
+
+    const timeout = setTimeout(async () => {
+      this.idlePanelBumpTimeouts.delete(guild.id);
+
+      const channel = await this.resolveMusicTextChannel(guild).catch(() => null);
+      if (!channel || channel.id !== message.channel.id) {
+        return;
+      }
+
+      await this.ensureIdlePanelForGuild(guild, { moveToBottom: true }).catch(() => null);
+    }, waitMs);
+
+    this.idlePanelBumpTimeouts.set(guild.id, timeout);
+  }
+
+  startIdlePanelBumpTask() {
     this.stopIdlePanelBumpTask();
-    this.idlePanelBumpTimer = setInterval(() => {
-      this.bumpIdlePanelsToBottom().catch(() => null);
-    }, Math.max(60_000, Number(intervalMs) || IDLE_PANEL_BUMP_MS));
   }
 
   stopIdlePanelBumpTask() {

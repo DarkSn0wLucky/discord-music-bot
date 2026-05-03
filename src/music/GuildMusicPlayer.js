@@ -17,6 +17,7 @@ const path = require("path");
 const {
   DEFAULT_VOLUME,
   L2TP_SOURCE_IP,
+  MAX_TRACK_DURATION_SEC,
   MAX_QUEUE_SIZE,
   YANDEX_COOKIES_PATH,
   VK_COOKIES_PATH,
@@ -24,11 +25,11 @@ const {
   YTDLP_COOKIES_PATH,
   YTDLP_EXTRACTOR_ARGS,
 } = require("../config");
-const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
+const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbed, buildTrackNoticeEmbed } = require("../ui/panel");
 const { resolveSearchCandidates } = require("./resolveTrack");
 const { resolveYandexDirectStreamUrl } = require("./yandexDirect");
 const { buildYtDlpEnv } = require("./ytdlpEnv");
-const { safeLinkText } = require("../utils/format");
+const { formatDuration, safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
 const PLAY_START_TIMEOUT_MS = 20_000;
@@ -241,6 +242,26 @@ function uniqueTracksByUrl(tracks, excludedUrls = new Set(), limit = Infinity) {
   return unique;
 }
 
+function trackDurationSec(track) {
+  const direct = Number(track?.durationSec);
+  if (Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+
+  const durationMs = Number(track?.durationMs);
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    return durationMs / 1000;
+  }
+
+  return 0;
+}
+
+function isTrackOverDurationLimit(track) {
+  const maxDurationSec = Math.max(1, Number(MAX_TRACK_DURATION_SEC) || 600);
+  const durationSec = trackDurationSec(track);
+  return durationSec > maxDurationSec;
+}
+
 class GuildMusicPlayer {
   constructor({ guild, client, onDispose }) {
     this.guild = guild;
@@ -334,14 +355,27 @@ class GuildMusicPlayer {
   }
 
   addTracks(tracks) {
+    const sourceTracks = Array.isArray(tracks) ? tracks : [];
+    const allowedTracks = [];
+    const tooLongTracks = [];
+
+    for (const track of sourceTracks) {
+      if (isTrackOverDurationLimit(track)) {
+        tooLongTracks.push(track);
+      } else {
+        allowedTracks.push(track);
+      }
+    }
+
     const available = Number.isFinite(MAX_QUEUE_SIZE)
       ? Math.max(0, MAX_QUEUE_SIZE - this.queue.length - (this.currentTrack ? 1 : 0))
-      : tracks.length;
-    const acceptedTracks = Number.isFinite(available) ? tracks.slice(0, available) : [...tracks];
+      : allowedTracks.length;
+    const acceptedTracks = Number.isFinite(available) ? allowedTracks.slice(0, available) : [...allowedTracks];
     this.queue.push(...acceptedTracks);
     return {
       accepted: acceptedTracks.length,
-      dropped: tracks.length - acceptedTracks.length,
+      dropped: allowedTracks.length - acceptedTracks.length,
+      tooLong: tooLongTracks.length,
     };
   }
 
@@ -405,6 +439,13 @@ class GuildMusicPlayer {
     try {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
+        if (isTrackOverDurationLimit(next)) {
+          await this.sendAction(
+            "Трек пропущен",
+            `**${safeLinkText(next.title)}** длиннее ${formatDuration(MAX_TRACK_DURATION_SEC)}.`
+          );
+          continue;
+        }
         this.transitionStartedAt = Date.now();
         this.currentTrack = { ...next, startedAt: null, loadingStartedAt: this.transitionStartedAt };
         await this.refreshPanel({ moveToBottom: movePanelToBottomOnStart });
@@ -626,7 +667,14 @@ class GuildMusicPlayer {
           }
           if (!suppressTrackAction) {
             const requestedBy = next.requestedById ? `<@${next.requestedById}>` : safeLinkText(next.requestedByTag || "unknown");
-            await this.sendAction("", `[${safeLinkText(next.title)}](${next.url})\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b ${requestedBy}`);
+            await this.sendAction("Трек запущен", "", {
+              embed: buildTrackNoticeEmbed("Трек запущен", next, {
+                actionText: "Запросил",
+                actorText: requestedBy,
+              }),
+              allowedMentions: next.requestedById ? { users: [next.requestedById] } : undefined,
+              dedupeKey: `track-started|${next.url || next.title || ""}|${next.requestedById || ""}`,
+            });
           }
           await this.refreshPanel();
           this.startProgressUpdater();
@@ -1114,7 +1162,14 @@ class GuildMusicPlayer {
       return;
     }
 
-    const message = await channel.send({ embeds: [buildActionEmbed(title, description)] });
+    const payload = {
+      embeds: [options.embed || buildActionEmbed(title, description)],
+    };
+    if (options.allowedMentions) {
+      payload.allowedMentions = options.allowedMentions;
+    }
+
+    const message = await channel.send(payload);
     if (dedupeKey) {
       this.lastActionSignature = dedupeKey;
       this.lastActionAt = Date.now();

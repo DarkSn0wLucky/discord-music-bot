@@ -1,5 +1,5 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require("discord.js");
-const { EMBED_COLOR_HEX } = require("../config");
+const { EMBED_COLOR_HEX, PROGRESS_FRAME_EMOJIS } = require("../config");
 const { formatDuration, loopLabel, progressBar, safeLinkText, truncate } = require("../utils/format");
 
 const BUTTON_IDS = {
@@ -41,6 +41,94 @@ function sourceLabel(track) {
   return safeLinkText(track?.source || "Источник не указан");
 }
 
+function firstText(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function isHttpUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function trackDisplayUrl(track) {
+  const url = firstText(track?.webpageUrl, track?.webpage_url, track?.displayUrl, track?.originalUrl, track?.original_url, track?.url);
+  return isHttpUrl(url) ? url : "";
+}
+
+function authorDisplayUrl(track) {
+  const directUrl = firstText(track?.authorUrl, track?.channelUrl, track?.channel_url, track?.uploaderUrl, track?.uploader_url);
+  if (isHttpUrl(directUrl)) {
+    return directUrl;
+  }
+
+  const author = firstText(track?.author);
+  if (!author) {
+    return "";
+  }
+
+  const sourceKey = detectSourceKey(track);
+  const encoded = encodeURIComponent(author);
+  if (sourceKey === "yandex") {
+    return `https://music.yandex.ru/search?text=${encoded}`;
+  }
+  if (sourceKey === "vk") {
+    return `https://vk.com/audio?q=${encoded}`;
+  }
+  if (sourceKey === "youtube") {
+    return `https://www.youtube.com/results?search_query=${encoded}`;
+  }
+
+  return "";
+}
+
+function markdownLink(label, url) {
+  const text = safeLinkText(label);
+  return isHttpUrl(url) ? `[${text}](${url})` : text;
+}
+
+function trackTitleLine(track, maxLength = 90) {
+  const title = truncate(safeLinkText(track?.title), maxLength);
+  return markdownLink(title, trackDisplayUrl(track));
+}
+
+function trackAuthorLine(track, maxLength = 90) {
+  const author = truncate(safeLinkText(track?.author || track?.source || ""), maxLength);
+  if (!author) {
+    return "";
+  }
+  return markdownLink(author, authorDisplayUrl(track));
+}
+
+function frameProgressBar(elapsedMs, totalMs) {
+  const frames = Array.isArray(PROGRESS_FRAME_EMOJIS) ? PROGRESS_FRAME_EMOJIS.filter(Boolean) : [];
+  if (frames.length < 2 || !Number.isFinite(totalMs) || totalMs <= 0) {
+    return "";
+  }
+
+  const ratio = Math.max(0, Math.min(1, Number(elapsedMs || 0) / totalMs));
+  const index = Math.max(0, Math.min(frames.length - 1, Math.round(ratio * (frames.length - 1))));
+  return frames[index];
+}
+
+function visualProgressBar(elapsedMs, totalMs, size = 28) {
+  const emojiFrame = frameProgressBar(elapsedMs, totalMs);
+  if (emojiFrame) {
+    return emojiFrame;
+  }
+
+  return progressBar(elapsedMs, totalMs, size);
+}
+
 function buildPlayerEmbed(player) {
   if (!player.currentTrack) {
     return new EmbedBuilder()
@@ -78,26 +166,62 @@ function buildPlayerEmbed(player) {
       ? `${formatDuration(displayElapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`
       : `${formatDuration(displayElapsedMs / 1000)} / --:--`;
 
-  const queuePreview =
-    player.queue
-      .slice(0, 3)
-      .map((item, index) => `${index + 1}. [${truncate(safeLinkText(item.title), 38)}](${item.url})`)
-      .join("\n") || "Пусто";
+  const trackLine = trackTitleLine(track, 90);
+  const authorLine = trackAuthorLine(track, 90);
+  const requestedBy = track.requestedById ? `<@${track.requestedById}>` : safeLinkText(track.requestedByTag || "unknown");
+  const progressLine = isStarting
+    ? progressBar(loadingProgressMs, 10_000, 28)
+    : visualProgressBar(barElapsedMs, durationMs, 28);
+  const details = [
+    trackLine,
+    authorLine,
+    "",
+    `${durationText.split(" / ")[0]}  ${progressLine}  ${durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--"}`,
+    "",
+    `${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил ${requestedBy}`,
+  ].filter((line) => line !== null && line !== undefined).join("\n");
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
     .setTitle("Сейчас играет")
-    .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
-    .addFields(
-      { name: "Источник", value: sourceLabel(track) },
-      {
-        name: "TIME",
-        value: `${isStarting ? progressBar(loadingProgressMs, 10_000, 34) : progressBar(barElapsedMs, durationMs, 34)}\n${durationText}`,
-      },
-      { name: "Дальше в очереди", value: queuePreview }
-    );
+    .setDescription(details);
 
   if (track.thumbnail) {
+    embed.setThumbnail(track.thumbnail);
+  }
+
+  return embed;
+}
+
+function buildTrackNoticeEmbed(title, track, options = {}) {
+  const actorText = String(options.actorText || "").trim();
+  const actionText = String(options.actionText || "").trim();
+  const durationSec = Number(track?.durationSec) || 0;
+  const authorLine = trackAuthorLine(track, 72);
+  const lines = [trackTitleLine(track, 72)];
+
+  if (authorLine) {
+    lines.push(authorLine);
+  }
+
+  if (durationSec > 0) {
+    lines.push("**Длительность**", formatDuration(durationSec));
+  }
+
+  if (actionText || actorText) {
+    lines.push(`${actionText || "Запросил"} ${actorText}`.trim());
+  }
+  if (options.extraText) {
+    lines.push(String(options.extraText).trim());
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(EMBED_COLOR_HEX)
+    .setTitle(title)
+    .setDescription(lines.join("\n"))
+    .setTimestamp(new Date());
+
+  if (track?.thumbnail) {
     embed.setThumbnail(track.thumbnail);
   }
 
@@ -171,7 +295,7 @@ function buildPanelComponents(player) {
 
 function buildQueueEmbed(player) {
   const current = player.currentTrack
-    ? `[${truncate(safeLinkText(player.currentTrack.title), 64)}](${player.currentTrack.url})`
+    ? markdownLink(truncate(safeLinkText(player.currentTrack.title), 64), trackDisplayUrl(player.currentTrack))
     : "Ничего не играет";
 
   const queueText =
@@ -179,7 +303,7 @@ function buildQueueEmbed(player) {
       .slice(0, 15)
       .map(
         (track, index) =>
-          `${index + 1}. [${truncate(safeLinkText(track.title), 56)}](${track.url}) · ${formatDuration(track.durationSec)}`
+          `${index + 1}. ${markdownLink(truncate(safeLinkText(track.title), 56), trackDisplayUrl(track))} · ${formatDuration(track.durationSec)}`
       )
       .join("\n") || "Пусто";
 
@@ -208,4 +332,6 @@ module.exports = {
   buildPanelComponents,
   buildQueueEmbed,
   buildActionEmbed,
+  buildTrackNoticeEmbed,
+  trackDisplayUrl,
 };

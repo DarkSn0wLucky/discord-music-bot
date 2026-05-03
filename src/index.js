@@ -102,6 +102,7 @@ client.on("interactionCreate", async (interaction) => {
 
 client.on("messageCreate", async (message) => {
   try {
+    manager.scheduleIdlePanelBumpAfterMessage(message);
     await handleAiMessage(message);
   } catch (error) {
     console.error("[AI message error]", error);

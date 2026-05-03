@@ -12,9 +12,9 @@ const {
   TextInputStyle,
   UserSelectMenuBuilder,
 } = require("discord.js");
-const { MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
+const { MAX_TRACK_DURATION_SEC, MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrack");
-const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
+const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed, buildTrackNoticeEmbed } = require("../ui/panel");
 const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
@@ -314,12 +314,6 @@ function interactionUserMention(interaction) {
   return interaction?.user?.id ? `<@${interaction.user.id}>` : safeLinkText(interaction?.user?.tag || "unknown");
 }
 
-function buildSkipNotice(result, interaction) {
-  const actor = interactionUserMention(interaction);
-  const title = result?.track?.title ? `**${safeLinkText(result.track.title)}**\n` : "";
-  return `${title}Пропустил ${actor}`;
-}
-
 function buildLoopNotice(mode, interaction) {
   const actor = interactionUserMention(interaction);
   if (mode === "off") {
@@ -335,6 +329,71 @@ async function movePlayerPanelBelowActions(player) {
   }
 
   await player.refreshPanel({ moveToBottom: true }).catch(() => null);
+}
+
+function schedulePlayerPanelBelowActions(player, delayMs = 0) {
+  if (!player || typeof player.refreshPanel !== "function") {
+    return;
+  }
+
+  setTimeout(() => {
+    player.refreshPanel({ moveToBottom: true }).catch(() => null);
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
+function trackDurationSec(track) {
+  const direct = Number(track?.durationSec);
+  if (Number.isFinite(direct) && direct > 0) {
+    return direct;
+  }
+
+  const durationMs = Number(track?.durationMs);
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    return durationMs / 1000;
+  }
+
+  return 0;
+}
+
+function splitTracksByDurationLimit(tracks) {
+  const maxDurationSec = Math.max(1, Number(MAX_TRACK_DURATION_SEC) || 600);
+  const accepted = [];
+  const tooLong = [];
+
+  for (const track of Array.isArray(tracks) ? tracks : []) {
+    const durationSec = trackDurationSec(track);
+    if (durationSec > maxDurationSec) {
+      tooLong.push(track);
+    } else {
+      accepted.push(track);
+    }
+  }
+
+  return { accepted, tooLong, maxDurationSec };
+}
+
+function buildTooLongTracksNotice(tooLongTracks, maxDurationSec) {
+  const count = Array.isArray(tooLongTracks) ? tooLongTracks.length : 0;
+  const sample = (tooLongTracks || [])
+    .slice(0, 5)
+    .map((track) => `• ${safeLinkText(track.title)} (${formatDuration(trackDurationSec(track))})`)
+    .join("\n");
+  const suffix = count > 5 ? `\nИ ещё: ${count - 5}.` : "";
+  return `В плейлисте ${count === 1 ? "трек длиннее" : "есть треки длиннее"} ${formatDuration(maxDurationSec)}. Я пропустил их, чтобы очередь не забивалась длинными треками.${sample ? `\n${sample}${suffix}` : ""}`;
+}
+
+async function sendTooLongTracksNotice(interaction, tooLongTracks, maxDurationSec) {
+  if (!Array.isArray(tooLongTracks) || tooLongTracks.length === 0) {
+    return;
+  }
+
+  await interaction
+    .followUp({
+      content: `${interactionUserMention(interaction)}, ${buildTooLongTracksNotice(tooLongTracks, maxDurationSec)}`,
+      ...EPHEMERAL_REPLY,
+      allowedMentions: { users: [interaction.user.id] },
+    })
+    .catch(() => null);
 }
 
 function startUrlResolveHeartbeat(progress) {
@@ -418,7 +477,12 @@ async function pickTrackFromMenu(interaction, query, tracks) {
     const selectedIndex = Number(selectedValue);
     const track = tracks[selectedIndex] || tracks[0];
     await selected.update({
-      embeds: [buildActionEmbed("Выбрано", `[${safeLinkText(track.title)}](${track.url}) • ${formatDuration(track.durationSec)}`)],
+      embeds: [
+        buildTrackNoticeEmbed("Выбрано", track, {
+          actionText: "Выбрал",
+          actorText: interactionUserMention(interaction),
+        }),
+      ],
       components: [],
     });
 
@@ -1149,6 +1213,25 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         return;
       }
 
+      const looksLikePlaylist = tracksToAdd.length > 1;
+      const durationFilter = splitTracksByDurationLimit(tracksToAdd);
+      const tooLongTracks = durationFilter.tooLong;
+      tracksToAdd = durationFilter.accepted;
+
+      if (!tracksToAdd.length) {
+        clearThinkingTimer();
+        progress.stop();
+        const title = looksLikePlaylist ? "Плейлист не добавлен" : "Трек не добавлен";
+        const description = looksLikePlaylist
+          ? `В плейлисте нет треков короче ${formatDuration(durationFilter.maxDurationSec)}.`
+          : `Трек длиннее ${formatDuration(durationFilter.maxDurationSec)}, поэтому я его не добавил.`;
+        await interaction.editReply({ embeds: [buildActionEmbed(title, description)], components: [] });
+        if (looksLikePlaylist) {
+          await sendTooLongTracksNotice(interaction, tooLongTracks, durationFilter.maxDurationSec);
+        }
+        return;
+      }
+
       await progress.update(70, "Подключаюсь к голосовому каналу");
       const player = manager.getOrCreate(interaction.guild);
       await player.setTextChannel(interaction.channelId);
@@ -1183,6 +1266,9 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         clearThinkingTimer();
         progress.stop();
         await clearDeferredReply(interaction);
+        if (looksLikePlaylist) {
+          await sendTooLongTracksNotice(interaction, tooLongTracks, durationFilter.maxDurationSec);
+        }
         return;
       }
 
@@ -1194,12 +1280,22 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       progress.stop();
       await interaction.editReply({
         embeds: [
-          buildActionEmbed(
-            "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c",
-            `${summary}${dropHint}\n\u0417\u0430\u043f\u0440\u043e\u0441\u0438\u043b ${requestedBy}`
-          ),
+          accepted === 1
+            ? buildTrackNoticeEmbed("Трек добавлен!", first, {
+                actionText: "Добавил",
+                actorText: requestedBy,
+                extraText: dropHint,
+              })
+            : buildActionEmbed(
+                "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c",
+                `${summary}${dropHint}\n\u0414\u043e\u0431\u0430\u0432\u0438\u043b ${requestedBy}`
+              ),
         ],
+        allowedMentions: { users: [interaction.user.id] },
       });
+      if (looksLikePlaylist) {
+        await sendTooLongTracksNotice(interaction, tooLongTracks, durationFilter.maxDurationSec);
+      }
       await player.refreshPanel({ moveToBottom: true });
     } catch (error) {
       if (error?.code === PLAY_TIMEOUT_ERROR_CODE) {
@@ -1258,11 +1354,16 @@ async function handleSkip(interaction, manager) {
     await interaction.deleteReply().catch(() => null);
     await interaction
       .followUp({
-        embeds: [buildActionEmbed("Скип", buildSkipNotice(result, interaction))],
+        embeds: [
+          buildTrackNoticeEmbed("Скип", result.track, {
+            actionText: "Пропустил",
+            actorText: interactionUserMention(interaction),
+          }),
+        ],
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
-    await movePlayerPanelBelowActions(player);
+    schedulePlayerPanelBelowActions(player, 2_000);
     return;
   }
 
@@ -1493,11 +1594,16 @@ async function handleButton(interaction, manager) {
     }
     await interaction
       .followUp({
-        embeds: [buildActionEmbed("Скип", buildSkipNotice(result, interaction))],
+        embeds: [
+          buildTrackNoticeEmbed("Скип", result.track, {
+            actionText: "Пропустил",
+            actorText: interactionUserMention(interaction),
+          }),
+        ],
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
-    await movePlayerPanelBelowActions(player);
+    schedulePlayerPanelBelowActions(player, 2_000);
     return;
   }
 

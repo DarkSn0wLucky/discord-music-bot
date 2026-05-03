@@ -112,6 +112,8 @@ module.exports = {
   YANDEX_COOKIES_PATH: process.env.YANDEX_COOKIES_PATH || "",
   VK_COOKIES_PATH: process.env.VK_COOKIES_PATH || "",
   EMBED_COLOR_HEX: process.env.EMBED_COLOR_HEX || "#4da3ff",
+  PROGRESS_FRAME_EMOJIS: asList(process.env.PROGRESS_FRAME_EMOJIS || ""),
+  MAX_TRACK_DURATION_SEC: asNumber(process.env.MAX_TRACK_DURATION_SEC, 600),
   MAX_QUEUE_SIZE: asLimit(process.env.MAX_QUEUE_SIZE, Number.POSITIVE_INFINITY),
   MAX_PLAYLIST_ITEMS: asLimit(process.env.MAX_PLAYLIST_ITEMS, Number.POSITIVE_INFINITY),
   AUTO_DISCONNECT_MS: asNumber(process.env.AUTO_DISCONNECT_MS, 180_000),

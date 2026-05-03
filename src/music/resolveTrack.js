@@ -901,13 +901,16 @@ function toYouTubeTrackFromApiItem(item, requestedBy) {
 
   const snippet = item?.snippet || {};
   const stats = item?.statistics || {};
+  const channelId = String(snippet.channelId || "").trim();
   const durationSec = parseIsoDurationToSeconds(item?.contentDetails?.duration);
 
   return {
     title: String(snippet.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ").trim() || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: `https://www.youtube.com/watch?v=${videoId}`,
+    webpageUrl: `https://www.youtube.com/watch?v=${videoId}`,
     source: "YouTube",
     author: String(snippet.channelTitle || "YouTube").trim() || "YouTube",
+    authorUrl: channelId ? `https://www.youtube.com/channel/${channelId}` : "",
     views: Number(stats.viewCount) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
@@ -949,8 +952,10 @@ function toYouTubeTrack(video, requestedBy) {
   return {
     title: video.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url: video.url,
+    webpageUrl: video.url,
     source: "YouTube",
     author: video.channel?.name || video.channel?.title || "YouTube",
+    authorUrl: video.channel?.url || (video.channel?.id ? `https://www.youtube.com/channel/${video.channel.id}` : ""),
     views: Number(video.views) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
@@ -1678,6 +1683,7 @@ function buildMetadataFallbackTrack(item, requestedBy, primaryQuery = "") {
   return {
     title: displayTitle || title || "Без названия",
     url: `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
+    webpageUrl: `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
     playbackUrl: `ytsearch1:${query}`,
     source: "YouTube",
     author: artist || "YouTube",
@@ -1772,6 +1778,9 @@ function toYandexCatalogTrack(rawItem, requestedBy, origin, fallbackInfo = {}) {
   }
 
   const artist = joinArtists(track?.artists);
+  const firstArtist = Array.isArray(track?.artists) ? track.artists.find((item) => item?.id || item?.name) : null;
+  const artistId = firstArtist?.id ? String(firstArtist.id).trim() : "";
+  const authorUrl = artistId ? new URL(`/artist/${artistId}`, origin).toString() : "";
   const url = buildYandexTrackUrl(origin, track, fallbackInfo);
   if (!url) {
     return null;
@@ -1791,9 +1800,11 @@ function toYandexCatalogTrack(rawItem, requestedBy, origin, fallbackInfo = {}) {
   return {
     title: artist ? `${artist} - ${title}` : title,
     url,
+    webpageUrl: url,
     playbackUrl: url,
     source: "Yandex Music",
     author: artist || "Yandex Music",
+    authorUrl,
     views: 0,
     durationSec,
     durationMs: metadata.durationMs,
@@ -3204,6 +3215,7 @@ function toVkTrack(entry, requestedBy, fallbackUrl, options = {}) {
 
   const author = String(entry?.uploader || entry?.artist || entry?.channel || "VK Music").trim() || "VK Music";
   const title = String(entry?.title || entry?.track || "VK Music track").trim() || "VK Music track";
+  const webpageUrl = String(entry?.webpage_url || entry?.webpageUrl || entry?.original_url || "").trim();
   const metadata = metadataFromExtractorEntry(entry, "") || {
     artist: author === "VK Music" ? "" : author,
     title,
@@ -3218,6 +3230,7 @@ function toVkTrack(entry, requestedBy, fallbackUrl, options = {}) {
       ? `${author} - ${title}`
       : title,
     url,
+    webpageUrl,
     playbackUrl: url,
     source: "VK Music",
     author,
@@ -4445,8 +4458,10 @@ function toYouTubeTrackFromYtDlp(entry, requestedBy, fallbackUrl = "") {
   return {
     title: String(entry?.title || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ").trim() || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ",
     url,
+    webpageUrl: String(entry?.webpage_url || entry?.original_url || url).trim(),
     source: "YouTube",
     author: String(entry?.uploader || entry?.channel || entry?.artist || "YouTube").trim() || "YouTube",
+    authorUrl: String(entry?.uploader_url || entry?.channel_url || "").trim(),
     views: Number(entry?.view_count) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
