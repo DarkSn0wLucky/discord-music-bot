@@ -356,16 +356,6 @@ async function movePlayerPanelBelowActions(player) {
   await player.refreshPanel({ moveToBottom: true }).catch(() => null);
 }
 
-function schedulePlayerPanelBelowActions(player, delayMs = 0) {
-  if (!player || typeof player.refreshPanel !== "function") {
-    return;
-  }
-
-  setTimeout(() => {
-    player.refreshPanel({ moveToBottom: true }).catch(() => null);
-  }, Math.max(0, Number(delayMs) || 0));
-}
-
 function trackDurationSec(track) {
   const direct = Number(track?.durationSec);
   if (Number.isFinite(direct) && direct > 0) {
@@ -1392,7 +1382,7 @@ async function handleSkip(interaction, manager) {
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
-    schedulePlayerPanelBelowActions(player, 2_000);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 
@@ -1633,7 +1623,7 @@ async function handleButton(interaction, manager) {
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
-    schedulePlayerPanelBelowActions(player, 2_000);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 
