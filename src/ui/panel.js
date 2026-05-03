@@ -96,6 +96,10 @@ function markdownLink(label, url) {
   return isHttpUrl(url) ? `[${text}](${url})` : text;
 }
 
+function subtextLine(text) {
+  return `-# ${String(text || "").trim()}`;
+}
+
 function compactTitle(track) {
   const rawTitle = safeLinkText(track?.title);
   const author = firstText(track?.artist, track?.author);
@@ -263,7 +267,7 @@ function buildPlayerEmbed(player) {
     .addFields(
       { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
       { name: "Дальше в очереди", value: buildQueuePreview(player) },
-      { name: "Источник", value: `${sourceLabel(track)} · Очередь: ${player.queue.length}\nДобавил ${requestedBy}` }
+      { name: "\u200b", value: subtextLine(`${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил: ${requestedBy}`) }
     );
   setTrackTitle(embed, track, 54);
   if (authorLine) {
@@ -304,7 +308,7 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
   if (actionText || actorText) {
     const actorLine = `${actionText || "Запросил"} ${actorText}`.trim();
     if (actorLine) {
-      lines.push(actorLine);
+      lines.push(subtextLine(actorLine));
     }
   }
 
