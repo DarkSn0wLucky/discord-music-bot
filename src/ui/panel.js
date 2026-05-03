@@ -13,9 +13,9 @@ const BUTTON_IDS = {
 };
 
 const SOURCE_EMOJIS = {
-  youtube: "<:abf8bfcc7668445d82e0b2d4e2dfbe47:1500272841352941669>",
-  vk: "<:c4ca7930d5644d87a061285a5a08ce7c:1500272793097601194>",
-  yandex: "<:88010a3b50f842c798b400d8f84e0a00:1500272777574350929>",
+  youtube: "<:youtube_cutout_alpha:1500386470261817364>",
+  vk: "<:vk_cutout_alpha_smooth2:1500386453136609400>",
+  yandex: "<:star_cutout_alpha:1500386482706448384>",
 };
 
 function detectSourceKey(track) {
