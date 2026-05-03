@@ -374,7 +374,7 @@ function buildQueueRow(player) {
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId(BUTTON_IDS.queueOpen)
-      .setLabel(`Очередь (${player.queue.length})`)
+      .setLabel("Очередь")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(player.queue.length === 0),
     new ButtonBuilder()
