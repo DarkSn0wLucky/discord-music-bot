@@ -329,6 +329,14 @@ function buildLoopNotice(mode, interaction) {
   return `Цикл включён: ${loopLabel(mode)}.\nВключил ${actor}`;
 }
 
+async function movePlayerPanelBelowActions(player) {
+  if (!player || typeof player.refreshPanel !== "function") {
+    return;
+  }
+
+  await player.refreshPanel({ moveToBottom: true }).catch(() => null);
+}
+
 function startUrlResolveHeartbeat(progress) {
   let stopped = false;
   let percent = 30;
@@ -1166,11 +1174,11 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
           : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
       await progress.update(95, "Запускаю воспроизведение");
-      const startedNow = await runWithPlayTimeout(player.playIfIdle());
+      const startedNow = await runWithPlayTimeout(player.playIfIdle({ movePanelToBottomOnStart: wasQueueEmpty }));
 
       if (wasQueueEmpty) {
         if (!startedNow) {
-          await player.refreshPanel();
+          await movePlayerPanelBelowActions(player);
         }
         clearThinkingTimer();
         progress.stop();
@@ -1254,6 +1262,7 @@ async function handleSkip(interaction, manager) {
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 
@@ -1488,6 +1497,7 @@ async function handleButton(interaction, manager) {
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 
@@ -1517,9 +1527,7 @@ async function handleButton(interaction, manager) {
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
-    setTimeout(() => {
-      player.refreshPanel({ moveToBottom: true }).catch(() => null);
-    }, 5_000);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 

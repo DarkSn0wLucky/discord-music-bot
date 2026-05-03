@@ -377,17 +377,17 @@ class GuildMusicPlayer {
     await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
   }
 
-  async playIfIdle() {
+  async playIfIdle(options = {}) {
     if (this.currentTrack || this.transitionLock) {
       return false;
     }
 
-    await this.playNext();
+    await this.playNext(options);
     return true;
   }
 
   async playNext(options = {}) {
-    const { suppressTrackAction = false, preservePanelMessage = false } = options;
+    const { suppressTrackAction = false, preservePanelMessage = false, movePanelToBottomOnStart = false } = options;
     if (this.transitionLock) return;
 
     this.transitionLock = true;
@@ -398,7 +398,7 @@ class GuildMusicPlayer {
         const next = this.queue.shift();
         this.transitionStartedAt = Date.now();
         this.currentTrack = { ...next, startedAt: null, loadingStartedAt: this.transitionStartedAt };
-        await this.refreshPanel();
+        await this.refreshPanel({ moveToBottom: movePanelToBottomOnStart });
         this.startProgressUpdater();
 
         try {
@@ -1202,4 +1202,3 @@ class GuildMusicPlayer {
 module.exports = {
   GuildMusicPlayer,
 };
-
