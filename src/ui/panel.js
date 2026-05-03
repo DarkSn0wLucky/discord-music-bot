@@ -1,6 +1,6 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require("discord.js");
 const { EMBED_COLOR_HEX, PROGRESS_FRAME_EMOJIS } = require("../config");
-const { formatDuration, loopLabel, progressBar, safeLinkText, truncate } = require("../utils/format");
+const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/format");
 
 const BUTTON_IDS = {
   toggle: "music:toggle",
@@ -71,7 +71,7 @@ function authorDisplayUrl(track) {
     return directUrl;
   }
 
-  const author = firstText(track?.author);
+  const author = firstText(track?.artist, track?.author);
   if (!author) {
     return "";
   }
@@ -96,13 +96,32 @@ function markdownLink(label, url) {
   return isHttpUrl(url) ? `[${text}](${url})` : text;
 }
 
+function compactTitle(track) {
+  const rawTitle = safeLinkText(track?.title);
+  const author = firstText(track?.artist, track?.author);
+  let title = rawTitle
+    .replace(/\s*\((?:official\s+)?(?:music\s+)?(?:video|audio|lyrics?|lyric video|visualizer|hd video)\)\s*$/i, "")
+    .replace(/\s*\[(?:official\s+)?(?:music\s+)?(?:video|audio|lyrics?|lyric video|visualizer|hd video)\]\s*$/i, "")
+    .trim();
+
+  if (author) {
+    const escapedAuthor = author.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    title = title
+      .replace(new RegExp(`^${escapedAuthor}\\s+[-–—]\\s+`, "i"), "")
+      .replace(new RegExp(`\\s+[-–—]\\s+${escapedAuthor}$`, "i"), "")
+      .trim();
+  }
+
+  return title || rawTitle;
+}
+
 function trackTitleLine(track, maxLength = 90) {
-  const title = truncate(safeLinkText(track?.title), maxLength);
+  const title = truncate(compactTitle(track), maxLength);
   return markdownLink(title, trackDisplayUrl(track));
 }
 
 function trackAuthorLine(track, maxLength = 90) {
-  const author = truncate(safeLinkText(track?.author || track?.source || ""), maxLength);
+  const author = truncate(safeLinkText(track?.artist || track?.author || track?.source || ""), maxLength);
   if (!author) {
     return "";
   }
@@ -126,7 +145,34 @@ function visualProgressBar(elapsedMs, totalMs, size = 28) {
     return emojiFrame;
   }
 
-  return progressBar(elapsedMs, totalMs, size);
+  const safeSize = Math.max(8, Number(size) || 18);
+  if (!Number.isFinite(totalMs) || totalMs <= 0) {
+    return `${"━".repeat(Math.max(0, safeSize - 1))}●`;
+  }
+
+  const ratio = Math.max(0, Math.min(1, Number(elapsedMs || 0) / totalMs));
+  const markerIndex =
+    elapsedMs >= totalMs
+      ? safeSize - 1
+      : Math.max(0, Math.min(safeSize - 1, Math.floor(ratio * (safeSize - 1))));
+
+  return Array.from({ length: safeSize }, (_, index) => {
+    if (index === markerIndex) {
+      return "●";
+    }
+    return "━";
+  }).join("");
+}
+
+function buildQueuePreview(player, limit = 3) {
+  const tracks = Array.isArray(player?.queue) ? player.queue.slice(0, limit) : [];
+  if (tracks.length === 0) {
+    return "Пусто";
+  }
+
+  return tracks
+    .map((track, index) => `${index + 1}. ${trackTitleLine(track, 46)}`)
+    .join("\n");
 }
 
 function buildPlayerEmbed(player) {
@@ -159,32 +205,28 @@ function buildPlayerEmbed(player) {
       : elapsedMs;
   const displayElapsedMs =
     !isStarting && playbackStatus === "playing" && durationMs > 0 ? Math.min(elapsedMs, durationMs) : elapsedMs;
-  const durationText =
-    isStarting
-      ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}`
-      : durationMs > 0
-      ? `${formatDuration(displayElapsedMs / 1000)} / ${formatDuration(durationMs / 1000)}`
-      : `${formatDuration(displayElapsedMs / 1000)} / --:--`;
-
-  const trackLine = trackTitleLine(track, 90);
-  const authorLine = trackAuthorLine(track, 90);
+  const trackLine = trackTitleLine(track, 54);
+  const authorLine = trackAuthorLine(track, 46);
   const requestedBy = track.requestedById ? `<@${track.requestedById}>` : safeLinkText(track.requestedByTag || "unknown");
   const progressLine = isStarting
-    ? progressBar(loadingProgressMs, 10_000, 28)
-    : visualProgressBar(barElapsedMs, durationMs, 28);
-  const details = [
+    ? visualProgressBar(loadingProgressMs, 10_000, 18)
+    : visualProgressBar(barElapsedMs, durationMs, 18);
+  const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(displayElapsedMs / 1000);
+  const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
+  const description = [
     trackLine,
     authorLine,
-    "",
-    `${durationText.split(" / ")[0]}  ${progressLine}  ${durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--"}`,
-    "",
-    `${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил ${requestedBy}`,
-  ].filter((line) => line !== null && line !== undefined).join("\n");
+  ].filter(Boolean).join("\n");
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
     .setTitle("Сейчас играет")
-    .setDescription(details);
+    .setDescription(description)
+    .addFields(
+      { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
+      { name: "Источник", value: `${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил ${requestedBy}` },
+      { name: "Дальше в очереди", value: buildQueuePreview(player) }
+    );
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);
@@ -197,8 +239,8 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
   const actorText = String(options.actorText || "").trim();
   const actionText = String(options.actionText || "").trim();
   const durationSec = Number(track?.durationSec) || 0;
-  const authorLine = trackAuthorLine(track, 72);
-  const lines = [trackTitleLine(track, 72)];
+  const authorLine = trackAuthorLine(track, 46);
+  const lines = [trackTitleLine(track, 48)];
 
   if (authorLine) {
     lines.push(authorLine);
@@ -209,10 +251,16 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
   }
 
   if (actionText || actorText) {
-    lines.push(`${actionText || "Запросил"} ${actorText}`.trim());
+    const actorLine = `${actionText || "Запросил"} ${actorText}`.trim();
+    if (actorLine) {
+      lines.push(actorLine);
+    }
   }
   if (options.extraText) {
-    lines.push(String(options.extraText).trim());
+    const extraText = String(options.extraText).trim();
+    if (extraText) {
+      lines.push(extraText);
+    }
   }
 
   const embed = new EmbedBuilder()
