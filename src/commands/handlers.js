@@ -314,6 +314,26 @@ function interactionUserMention(interaction) {
   return interaction?.user?.id ? `<@${interaction.user.id}>` : safeLinkText(interaction?.user?.tag || "unknown");
 }
 
+function interactionUserFooterLabel(interaction) {
+  const rawName =
+    interaction?.member?.displayName ||
+    interaction?.user?.globalName ||
+    interaction?.user?.username ||
+    interaction?.user?.tag ||
+    "unknown";
+  const name = safeLinkText(String(rawName).replace(/#0{1,4}$/u, "").replace(/#\d{4}$/u, "").trim() || "unknown");
+  return name.startsWith("@") ? name : `@${name}`;
+}
+
+function stampRequesterDisplayName(tracks, interaction) {
+  const label = interactionUserFooterLabel(interaction);
+  for (const track of Array.isArray(tracks) ? tracks : []) {
+    if (track && typeof track === "object") {
+      track.requestedByDisplayName = label;
+    }
+  }
+}
+
 function buildLoopNotice(mode, interaction) {
   const actor = interactionUserMention(interaction);
   if (mode === "off") {
@@ -481,6 +501,7 @@ async function pickTrackFromMenu(interaction, query, tracks) {
         buildTrackNoticeEmbed("Выбрано", track, {
           actionText: "Выбрал",
           actorText: interactionUserMention(interaction),
+          footerText: `Выбрал ${interactionUserFooterLabel(interaction)}`,
         }),
       ],
       components: [],
@@ -1213,6 +1234,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         return;
       }
 
+      stampRequesterDisplayName(tracksToAdd, interaction);
       const looksLikePlaylist = tracksToAdd.length > 1;
       const durationFilter = splitTracksByDurationLimit(tracksToAdd);
       const tooLongTracks = durationFilter.tooLong;
@@ -1284,6 +1306,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
             ? buildTrackNoticeEmbed("Трек добавлен!", first, {
                 actionText: "Добавил",
                 actorText: requestedBy,
+                footerText: `Добавил ${interactionUserFooterLabel(interaction)}`,
                 extraText: dropHint,
               })
             : buildActionEmbed(
@@ -1358,6 +1381,7 @@ async function handleSkip(interaction, manager) {
           buildTrackNoticeEmbed("Скип", result.track, {
             actionText: "Пропустил",
             actorText: interactionUserMention(interaction),
+            footerText: `Пропустил ${interactionUserFooterLabel(interaction)}`,
           }),
         ],
         allowedMentions: { users: [interaction.user.id] },
@@ -1598,6 +1622,7 @@ async function handleButton(interaction, manager) {
           buildTrackNoticeEmbed("Скип", result.track, {
             actionText: "Пропустил",
             actorText: interactionUserMention(interaction),
+            footerText: `Пропустил ${interactionUserFooterLabel(interaction)}`,
           }),
         ],
         allowedMentions: { users: [interaction.user.id] },

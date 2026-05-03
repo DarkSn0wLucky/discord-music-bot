@@ -128,6 +128,30 @@ function trackAuthorLine(track, maxLength = 90) {
   return markdownLink(author, authorDisplayUrl(track));
 }
 
+function compactActorLabel(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const mention = raw.match(/^<@!?(\d+)>$/);
+  if (mention) {
+    return `@${mention[1]}`;
+  }
+
+  const withoutDiscriminator = raw.replace(/#0{1,4}$/u, "").replace(/#\d{4}$/u, "").trim();
+  const label = safeLinkText(withoutDiscriminator || raw);
+  return label.startsWith("@") ? label : `@${label}`;
+}
+
+function buildActorFooter(actionText, actorText, track) {
+  const action = String(actionText || "Запросил").trim();
+  const actor = compactActorLabel(
+    firstText(track?.requestedByDisplayName, actorText, track?.requestedByTag, track?.requestedById)
+  );
+  return [action, actor].filter(Boolean).join(" ");
+}
+
 function frameProgressBar(elapsedMs, totalMs) {
   const frames = Array.isArray(PROGRESS_FRAME_EMOJIS) ? PROGRESS_FRAME_EMOJIS.filter(Boolean) : [];
   if (frames.length < 2 || !Number.isFinite(totalMs) || totalMs <= 0) {
@@ -207,7 +231,7 @@ function buildPlayerEmbed(player) {
     !isStarting && playbackStatus === "playing" && durationMs > 0 ? Math.min(elapsedMs, durationMs) : elapsedMs;
   const trackLine = trackTitleLine(track, 54);
   const authorLine = trackAuthorLine(track, 46);
-  const requestedBy = track.requestedById ? `<@${track.requestedById}>` : safeLinkText(track.requestedByTag || "unknown");
+  const requestedByFooter = buildActorFooter("Добавил", "", track);
   const progressLine = isStarting
     ? visualProgressBar(loadingProgressMs, 10_000, 18)
     : visualProgressBar(barElapsedMs, durationMs, 18);
@@ -224,12 +248,15 @@ function buildPlayerEmbed(player) {
     .setDescription(description)
     .addFields(
       { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
-      { name: "Источник", value: `${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил ${requestedBy}` },
-      { name: "Дальше в очереди", value: buildQueuePreview(player) }
+      { name: "Дальше в очереди", value: buildQueuePreview(player) },
+      { name: "Источник", value: `${sourceLabel(track)} · Треков в очереди: ${player.queue.length}` }
     );
 
   if (track.thumbnail) {
     embed.setThumbnail(track.thumbnail);
+  }
+  if (requestedByFooter) {
+    embed.setFooter({ text: requestedByFooter });
   }
 
   return embed;
@@ -238,6 +265,7 @@ function buildPlayerEmbed(player) {
 function buildTrackNoticeEmbed(title, track, options = {}) {
   const actorText = String(options.actorText || "").trim();
   const actionText = String(options.actionText || "").trim();
+  const footerText = String(options.footerText || buildActorFooter(actionText, actorText, track)).trim();
   const durationSec = Number(track?.durationSec) || 0;
   const authorLine = trackAuthorLine(track, 46);
   const lines = [trackTitleLine(track, 48)];
@@ -250,12 +278,6 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
     lines.push("**Длительность**", formatDuration(durationSec));
   }
 
-  if (actionText || actorText) {
-    const actorLine = `${actionText || "Запросил"} ${actorText}`.trim();
-    if (actorLine) {
-      lines.push(actorLine);
-    }
-  }
   if (options.extraText) {
     const extraText = String(options.extraText).trim();
     if (extraText) {
@@ -269,6 +291,9 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
     .setDescription(lines.join("\n"))
     .setTimestamp(new Date());
 
+  if (footerText) {
+    embed.setFooter({ text: footerText });
+  }
   if (track?.thumbnail) {
     embed.setThumbnail(track.thumbnail);
   }
