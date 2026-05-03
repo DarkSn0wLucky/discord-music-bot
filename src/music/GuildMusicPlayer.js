@@ -26,6 +26,7 @@ const {
 } = require("../config");
 const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbed } = require("../ui/panel");
 const { resolveSearchCandidates } = require("./resolveTrack");
+const { resolveYandexDirectStreamUrl } = require("./yandexDirect");
 const { buildYtDlpEnv } = require("./ytdlpEnv");
 const { safeLinkText } = require("../utils/format");
 
@@ -172,6 +173,14 @@ function isVkCatalogTrack(track) {
   const playbackUrl = String(track?.playbackUrl || track?.url || "");
 
   return catalogSource === "vk" || source.includes("vk") || playbackUrlCatalogKind(playbackUrl) === "vk";
+}
+
+function isYandexCatalogTrack(track) {
+  const source = String(track?.source || "").toLowerCase();
+  const catalogSource = String(track?.catalogSource || "").toLowerCase();
+  const playbackUrl = String(track?.playbackUrl || track?.url || "");
+
+  return catalogSource === "yandex" || source.includes("yandex") || playbackUrlCatalogKind(playbackUrl) === "yandex";
 }
 
 function isSourceUnavailableError(message) {
@@ -404,7 +413,7 @@ class GuildMusicPlayer {
         try {
           console.log(`[Play] Р—Р°РїСѓСЃРє С‚СЂРµРєР°: ${next.title} | ${next.url}`);
 
-          const playbackUrl = String(next?.playbackUrl || next?.url || "").trim();
+          let playbackUrl = String(next?.playbackUrl || next?.url || "").trim();
           if (!playbackUrl) {
             throw new Error("Пустой URL источника");
           }
@@ -417,7 +426,14 @@ class GuildMusicPlayer {
           let failedBeforePlaying = false;
           let hasStartedPlaying = false;
           let playingStartedAt = null;
+          const isYandexTrack = isYandexCatalogTrack(next) || catalogKind === "yandex";
           const cookiesPath = resolveYtDlpCookiesPath(next, playbackUrl);
+          if (isYandexTrack && catalogKind === "yandex") {
+            playbackUrl = await resolveYandexDirectStreamUrl(playbackUrl, {
+              cookiesPath,
+            });
+          }
+          const playbackCatalogKind = playbackUrlCatalogKind(playbackUrl);
           const isYouTubeLike =
             /(?:youtube\.com|youtu\.be)/i.test(playbackUrl) ||
             String(next.source || "").toLowerCase().includes("youtube");
@@ -434,10 +450,13 @@ class GuildMusicPlayer {
             "--buffer-size",
             "128K",
             "--geo-bypass",
-            "--force-ipv4",
             "--user-agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
           ];
+
+          if (!isYandexTrack) {
+            ytDlpArgs.push("--force-ipv4");
+          }
 
           if (isYouTubeLike) {
             const extractorArgs = String(YTDLP_EXTRACTOR_ARGS || "").trim();
@@ -450,11 +469,14 @@ class GuildMusicPlayer {
             ytDlpArgs.push("--referer", "https://vk.com/");
           }
 
-          if (catalogKind === "yandex") {
+          if (catalogKind === "yandex" || playbackCatalogKind === "yandex" || isYandexTrack) {
             ytDlpArgs.push("--referer", "https://music.yandex.ru/");
           }
 
-          if (shouldUseHomeL2tpForPlaybackUrl(playbackUrl) || (isVkTrack && isHomeL2tpPlaybackEnabled())) {
+          if (
+            shouldUseHomeL2tpForPlaybackUrl(playbackUrl) ||
+            ((isVkTrack || isYandexTrack) && isHomeL2tpPlaybackEnabled())
+          ) {
             ytDlpArgs.push("--source-address", String(L2TP_SOURCE_IP || "").trim());
           }
 

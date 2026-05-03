@@ -1776,12 +1776,11 @@ function toYandexCatalogTrack(rawItem, requestedBy, origin, fallbackInfo = {}) {
   };
   const fallbackTrack = buildMetadataFallbackTrack(metadata, requestedBy);
   const searchQuery = buildQueryFromArtistTitle(artist, title) || title;
-  const playbackUrl = fallbackTrack?.playbackUrl || url;
 
   return {
     title: artist ? `${artist} - ${title}` : title,
     url,
-    playbackUrl,
+    playbackUrl: url,
     source: "Yandex Music",
     author: artist || "Yandex Music",
     views: 0,
