@@ -67,6 +67,11 @@ function isUrlLike(value) {
   }
 }
 
+function isDirectCatalogTrack(track) {
+  const source = `${String(track?.catalogSource || "")} ${String(track?.source || "")}`.toLowerCase();
+  return source.includes("vk") || source.includes("yandex");
+}
+
 function normalizePickerText(value) {
   return String(value || "")
     .toLowerCase()
@@ -1179,7 +1184,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         await progress.update(62, "Ссылку обработал");
         tracksToAdd = resolved.tracks;
 
-        if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery) {
+        if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery && !isDirectCatalogTrack(tracksToAdd[0])) {
           const primaryTrack = tracksToAdd[0];
           await progress.update(48, "Ищу похожие варианты");
           const extraCandidates = await runWithPlayTimeout(
