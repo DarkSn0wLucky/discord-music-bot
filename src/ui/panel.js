@@ -41,6 +41,15 @@ function sourceLabel(track) {
   return safeLinkText(track?.source || "Источник не указан");
 }
 
+function compactSourceName(track) {
+  const key = detectSourceKey(track);
+  const prefix = SOURCE_EMOJIS[key] ? `${SOURCE_EMOJIS[key]} ` : "";
+  if (key === "youtube") return `${prefix}YouTube`;
+  if (key === "yandex") return `${prefix}Yandex`;
+  if (key === "vk") return `${prefix}VK`;
+  return sourceLabel(track);
+}
+
 function firstText(...values) {
   for (const value of values) {
     const text = String(value || "").trim();
@@ -257,8 +266,8 @@ function buildPlayerEmbed(player) {
   const authorLine = trackAuthorLine(track, 46);
   const requestedBy = trackRequesterMention(track);
   const progressLine = isStarting
-    ? visualProgressBar(loadingProgressMs, 10_000, 18)
-    : visualProgressBar(barElapsedMs, durationMs, 18);
+    ? visualProgressBar(loadingProgressMs, 10_000, 12)
+    : visualProgressBar(barElapsedMs, durationMs, 12);
   const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(displayElapsedMs / 1000);
   const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
   const embed = new EmbedBuilder()
@@ -267,7 +276,7 @@ function buildPlayerEmbed(player) {
     .addFields(
       { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
       { name: "Дальше в очереди", value: buildQueuePreview(player) },
-      { name: "\u200b", value: subtextLine(`${sourceLabel(track)} · Треков в очереди: ${player.queue.length} · Добавил: ${requestedBy}`) }
+      { name: "\u200b", value: subtextLine(`${compactSourceName(track)} · Очередь: ${player.queue.length} · ${requestedBy}`) }
     );
   setTrackTitle(embed, track, 54);
   if (authorLine) {
