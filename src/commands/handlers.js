@@ -983,7 +983,10 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
   const memberVoice = interaction.member?.voice?.channel;
   if (!memberVoice) {
-    await interaction.reply({ content: "Зайди в голосовой канал и нажми красную кнопку «Добавить трек» в плеере выше.", ...EPHEMERAL_REPLY });
+    const player = manager.get(interaction.guild.id);
+    const hasActiveMusic = Boolean(player?.currentTrack) || (Array.isArray(player?.queue) && player.queue.length > 0) || Boolean(player?.transitionLock);
+    const buttonLabel = hasActiveMusic ? "Добавить трек" : "ВКЛЮЧИТЬ МУЗЫКУ СЕЙЧАС";
+    await interaction.reply({ content: `Зайди в голосовой канал и нажми красную кнопку «${buttonLabel}» в плеере выше.`, ...EPHEMERAL_REPLY });
     return;
   }
 

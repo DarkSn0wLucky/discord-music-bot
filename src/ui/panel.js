@@ -13,9 +13,9 @@ const BUTTON_IDS = {
 };
 
 const SOURCE_EMOJIS = {
-  youtube: "<:youtube:1500272841352941669>",
-  vk: "<:vk:1500272793097601194>",
-  yandex: "<:yandex:150027277754350929>",
+  youtube: "<:abf8bfcc7668445d82e0b2d4e2dfbe47:1500272841352941669>",
+  vk: "<:c4ca7930d5644d87a061285a5a08ce7c:1500272793097601194>",
+  yandex: "<:88010a3b50f842c798b400d8f84e0a00:1500272777574350929>",
 };
 
 function detectSourceKey(track) {
@@ -75,9 +75,7 @@ function buildPlayerEmbed(player) {
     .setTitle("Сейчас играет")
     .setDescription(`[${truncate(safeLinkText(track.title), 90)}](${track.url})`)
     .addFields(
-      { name: "Источник", value: sourceLabel(track), inline: true },
-      { name: "Цикл", value: loopLabel(player.loopMode), inline: true },
-      { name: "Длина очереди", value: String(player.queue.length), inline: true },
+      { name: "Источник", value: sourceLabel(track) },
       { name: "TIME", value: `${progressBar(elapsedMs, durationMs, 34)}\n${durationText}` },
       { name: "Дальше в очереди", value: queuePreview }
     );
@@ -111,11 +109,6 @@ function buildControlsRow(player) {
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(idle),
     new ButtonBuilder()
-      .setCustomId(BUTTON_IDS.shuffle)
-      .setLabel("Шафл")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(player.queue.length < 2),
-    new ButtonBuilder()
       .setCustomId(BUTTON_IDS.loop)
       .setLabel(loopButtonLabel)
       .setStyle(player.loopMode === "off" ? ButtonStyle.Secondary : ButtonStyle.Primary)
@@ -133,7 +126,12 @@ function buildQueueRow(player) {
       .setCustomId(BUTTON_IDS.queueOpen)
       .setLabel(`Очередь (${player.queue.length})`)
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(player.queue.length === 0)
+      .setDisabled(player.queue.length === 0),
+    new ButtonBuilder()
+      .setCustomId(BUTTON_IDS.shuffle)
+      .setLabel("Шафл")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(player.queue.length < 2)
   );
 }
 

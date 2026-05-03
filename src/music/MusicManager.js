@@ -140,11 +140,13 @@ class MusicManager {
       }
 
       const hasActivePlayback = Boolean(player.currentTrack) || player.queue.length > 0 || player.transitionLock;
-      if (!hasActivePlayback) {
-        await player.setTextChannel(channel.id);
-        await player.refreshPanel({ moveToBottom: true });
+      if (hasActivePlayback) {
         return;
       }
+
+      await player.setTextChannel(channel.id);
+      await player.refreshPanel({ moveToBottom: true });
+      return;
     }
 
     const messages = await channel.messages.fetch({ limit: 40 }).catch(() => null);
