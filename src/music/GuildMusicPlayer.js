@@ -10,7 +10,7 @@ const {
   StreamType,
 } = require("@discordjs/voice");
 
-const { spawn } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -33,6 +33,7 @@ const { formatDuration, safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
 const PLAY_START_TIMEOUT_MS = 20_000;
+const STREAM_DURATION_PROBE_TIMEOUT_MS = 12_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const ACTION_DEDUPE_WINDOW_MS = 4_000;
 const PLAYBACK_PANEL_UPDATE_MS = 2_000;
@@ -234,6 +235,10 @@ function isYouTubeAuthGateError(message) {
   return /(sign in to confirm you.?re not a bot|http error 403|forbidden|login required)/i.test(String(message));
 }
 
+function isYandexPreviewOnlyError(message) {
+  return /Yandex direct stream is preview only/i.test(String(message || ""));
+}
+
 function prettifyPlaybackError(message) {
   const value = String(message || "").trim();
   if (!value) {
@@ -252,7 +257,63 @@ function prettifyPlaybackError(message) {
     return "YouTube запросил повторную авторизацию. Обнови YouTube cookies и перезапусти бота.";
   }
 
+  if (isYandexPreviewOnlyError(value)) {
+    return "Yandex Music отдал только короткий preview вместо полного трека. Нужны свежие Yandex cookies с доступом к полной версии.";
+  }
+
   return value;
+}
+
+function probeRemoteAudioDurationSec(url) {
+  return new Promise((resolve) => {
+    const target = String(url || "").trim();
+    if (!target) {
+      resolve(0);
+      return;
+    }
+
+    execFile(
+      String(process.env.FFPROBE_BIN || "ffprobe"),
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=nk=1:nw=1",
+        target,
+      ],
+      {
+        windowsHide: true,
+        timeout: STREAM_DURATION_PROBE_TIMEOUT_MS,
+        maxBuffer: 128 * 1024,
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(0);
+          return;
+        }
+
+        const duration = Number.parseFloat(String(stdout || "").trim());
+        resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
+      }
+    );
+  });
+}
+
+function isShortPreviewDuration(actualSec, expectedSec) {
+  const actual = Number(actualSec) || 0;
+  const expected = Number(expectedSec) || 0;
+  if (actual <= 0 || expected < 60) {
+    return false;
+  }
+
+  const missingSec = expected - actual;
+  if (actual <= 45 && missingSec >= 20) {
+    return true;
+  }
+
+  return missingSec >= Math.max(30, expected * 0.35);
 }
 
 function uniqueTracksByUrl(tracks, excludedUrls = new Set(), limit = Infinity) {
@@ -509,6 +570,13 @@ class GuildMusicPlayer {
             playbackUrl = await resolveYandexDirectStreamUrl(playbackUrl, {
               cookiesPath,
             });
+            const expectedDurationSec = Number(next.durationSec) || (Number(next.durationMs) > 0 ? Number(next.durationMs) / 1000 : 0);
+            const directDurationSec = await probeRemoteAudioDurationSec(playbackUrl);
+            if (isShortPreviewDuration(directDurationSec, expectedDurationSec)) {
+              throw new Error(
+                `Yandex direct stream is preview only (${Math.round(directDurationSec)}s of ${Math.round(expectedDurationSec)}s)`
+              );
+            }
           }
           const playbackCatalogKind = playbackUrlCatalogKind(playbackUrl);
           const isYouTubeLike =
@@ -797,7 +865,9 @@ class GuildMusicPlayer {
           }
 
           const actionTitle =
-            isSourceUnavailableError(error.message) || isYouTubeAuthGateError(error.message)
+            isSourceUnavailableError(error.message) ||
+            isYouTubeAuthGateError(error.message) ||
+            isYandexPreviewOnlyError(error.message)
               ? "Источник недоступен"
               : "Трек пропущен";
           await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${prettifyPlaybackError(error.message)}\``);
