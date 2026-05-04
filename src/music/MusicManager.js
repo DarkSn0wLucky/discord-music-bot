@@ -75,6 +75,22 @@ class MusicManager {
     );
   }
 
+  hasActiveMusicPlayback(guildId) {
+    const player = this.players.get(guildId);
+    if (!player) {
+      return false;
+    }
+
+    const playerState = player.player?.state?.status;
+    const hasPlaybackState =
+      playerState === AudioPlayerStatus.Playing ||
+      playerState === AudioPlayerStatus.Paused ||
+      playerState === AudioPlayerStatus.AutoPaused ||
+      playerState === AudioPlayerStatus.Buffering;
+
+    return Boolean(player.currentTrack) || player.queue.length > 0 || player.transitionLock || hasPlaybackState;
+  }
+
   async resolveMusicTextChannel(guild) {
     if (!guild) {
       return null;
@@ -208,6 +224,10 @@ class MusicManager {
       return;
     }
 
+    if (message.author?.id === this.client.user?.id) {
+      return;
+    }
+
     if (MUSIC_TEXT_CHANNEL_ID) {
       if (message.channel.id !== MUSIC_TEXT_CHANNEL_ID) {
         return;
@@ -225,6 +245,10 @@ class MusicManager {
     }
 
     const guild = message.guild;
+    if (this.hasActiveMusicPlayback(guild.id)) {
+      return;
+    }
+
     const waitMs = Math.max(60_000, Number(delayMs) || IDLE_PANEL_BUMP_AFTER_MESSAGE_MS);
 
     if (this.idlePanelBumpTimeouts.has(guild.id)) {
@@ -236,6 +260,10 @@ class MusicManager {
 
       const channel = await this.resolveMusicTextChannel(guild).catch(() => null);
       if (!channel || channel.id !== message.channel.id) {
+        return;
+      }
+
+      if (this.hasActiveMusicPlayback(guild.id)) {
         return;
       }
 
