@@ -129,11 +129,11 @@ function getCookiePathForUrl(url) {
   try {
     const parsed = new URL(String(url || "").trim());
     if (isYandexMusicHost(parsed.hostname)) {
-      return resolveExistingFilePath(YANDEX_COOKIES_PATH) || null;
+      return resolveCookieFilePath(YANDEX_COOKIES_PATH) || resolveCookieFilePath(YTDLP_COOKIES_PATH) || null;
     }
 
     if (isVkMusicHost(parsed.hostname)) {
-      return resolveExistingFilePath(VK_COOKIES_PATH) || null;
+      return resolveCookieFilePath(VK_COOKIES_PATH) || resolveCookieFilePath(YTDLP_COOKIES_PATH) || null;
     }
   } catch {
     return null;
@@ -219,6 +219,15 @@ function readCookiesFromFile(cookiesPath) {
     cookiesFileCache.set(absolutePath, { cookies: [], checkedAt: Date.now() });
     return [];
   }
+}
+
+function resolveCookieFilePath(cookiesPath) {
+  const absolutePath = resolveExistingFilePath(cookiesPath);
+  if (!absolutePath) {
+    return null;
+  }
+
+  return readCookiesFromFile(absolutePath).length > 0 ? absolutePath : null;
 }
 
 function hostMatchesCookieDomain(hostname, domain, includeSubdomains) {
@@ -2681,7 +2690,7 @@ async function resolveYandexUrl(url, requestedBy) {
     return null;
   }
 
-  const hasYandexCookies = Boolean(resolveExistingFilePath(YANDEX_COOKIES_PATH));
+  const hasYandexCookies = Boolean(resolveCookieFilePath(YANDEX_COOKIES_PATH) || resolveCookieFilePath(YTDLP_COOKIES_PATH));
   let playlistMappingFailed = false;
   let antiBotDetected = false;
 
@@ -3035,7 +3044,7 @@ async function resolveYandexUrl(url, requestedBy) {
 
   const ytdlpFallback = await resolveViaYtDlpMetadata(url, requestedBy, {
     sourceLabel: "Yandex Music",
-    cookiesPath: YANDEX_COOKIES_PATH || YTDLP_COOKIES_PATH,
+    cookiesPath: resolveCookieFilePath(YANDEX_COOKIES_PATH) || resolveCookieFilePath(YTDLP_COOKIES_PATH),
     timeoutMs: 30_000,
     playlistKind: "yandex_playlist",
     trackKind: "yandex_track",
@@ -4562,7 +4571,7 @@ function fetchYtDlpJson(url, options = {}) {
       args.push("--playlist-end", String(Math.floor(playlistEnd)));
     }
 
-    const cookiesPath = resolveExistingFilePath(options.cookiesPath);
+    const cookiesPath = resolveCookieFilePath(options.cookiesPath);
     if (cookiesPath) {
       args.push("--cookies", cookiesPath);
     }

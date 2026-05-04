@@ -114,9 +114,41 @@ function resolveConfiguredCookiesPath(configuredPath) {
     ? value
     : path.resolve(process.cwd(), value);
 
-  const resolvedPath = fs.existsSync(absolutePath) ? absolutePath : null;
+  const resolvedPath = isUsableCookieFile(absolutePath) ? absolutePath : null;
   cookiesPathCache.set(value, { absolutePath: resolvedPath, checkedAt: Date.now() });
   return resolvedPath;
+}
+
+function isUsableCookieFile(absolutePath) {
+  try {
+    const stat = fs.statSync(absolutePath);
+    if (!stat.isFile() || stat.size <= 0) {
+      return false;
+    }
+
+    const content = fs.readFileSync(absolutePath, "utf8").trim();
+    if (!content) {
+      return false;
+    }
+
+    if (content.startsWith("[") || content.startsWith("{")) {
+      const parsed = JSON.parse(content);
+      const entries = Array.isArray(parsed) ? parsed : Array.isArray(parsed.cookies) ? parsed.cookies : [];
+      return entries.some((entry) => String(entry?.domain || "").trim() && String(entry?.name || "").trim());
+    }
+
+    return content
+      .split(/\r?\n/)
+      .some((line) => {
+        const text = String(line || "").trim();
+        if (!text || (text.startsWith("#") && !text.startsWith("#HttpOnly_"))) {
+          return false;
+        }
+        return text.split("\t").length >= 7;
+      });
+  } catch {
+    return false;
+  }
 }
 
 function isYouTubePlaybackUrl(value) {
@@ -214,6 +246,10 @@ function prettifyPlaybackError(message) {
 
   if (/Playback start timeout/i.test(value)) {
     return "Источник не успел запуститься вовремя.";
+  }
+
+  if (isYouTubeAuthGateError(value)) {
+    return "YouTube запросил повторную авторизацию. Обнови YouTube cookies и перезапусти бота.";
   }
 
   return value;
@@ -760,7 +796,10 @@ class GuildMusicPlayer {
             }
           }
 
-          const actionTitle = isSourceUnavailableError(error.message) ? "Трек недоступен" : "Трек пропущен";
+          const actionTitle =
+            isSourceUnavailableError(error.message) || isYouTubeAuthGateError(error.message)
+              ? "Источник недоступен"
+              : "Трек пропущен";
           await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${prettifyPlaybackError(error.message)}\``);
         }
       }
