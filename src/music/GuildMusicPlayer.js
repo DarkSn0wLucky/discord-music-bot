@@ -919,7 +919,7 @@ class GuildMusicPlayer {
 
     this.currentTrack = null;
     await this.playNext({
-      suppressTrackAction,
+      suppressTrackAction: suppressTrackAction || !skipped,
       preservePanelMessage,
     });
   }

@@ -19,6 +19,7 @@ const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
+const TOO_LONG_NOTICE_AUTO_DELETE_MS = 60_000;
 const playRequestQueueByGuild = new Map();
 const PLAY_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PLAY_REQUEST_TIMEOUT_MS || "0", 10);
 const HAS_PLAY_REQUEST_TIMEOUT = Number.isFinite(PLAY_REQUEST_TIMEOUT_MS) && PLAY_REQUEST_TIMEOUT_MS > 0;
@@ -397,18 +398,32 @@ function buildTooLongTracksNotice(tooLongTracks, maxDurationSec) {
   return `В плейлисте ${count === 1 ? "трек длиннее" : "есть треки длиннее"} ${formatDuration(maxDurationSec)}. Я пропустил их, чтобы очередь не забивалась длинными треками.${sample ? `\n${sample}${suffix}` : ""}`;
 }
 
+async function sendAutoDeletingEphemeralFollowUp(interaction, payload, autoDeleteMs = TOO_LONG_NOTICE_AUTO_DELETE_MS) {
+  const message = await interaction
+    .followUp({
+      ...payload,
+      ...EPHEMERAL_REPLY,
+    })
+    .catch(() => null);
+
+  if (message && Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
+    setTimeout(() => {
+      message.delete().catch(() => null);
+    }, autoDeleteMs);
+  }
+
+  return message;
+}
+
 async function sendTooLongTracksNotice(interaction, tooLongTracks, maxDurationSec) {
   if (!Array.isArray(tooLongTracks) || tooLongTracks.length === 0) {
     return;
   }
 
-  await interaction
-    .followUp({
-      content: `${interactionUserMention(interaction)}, ${buildTooLongTracksNotice(tooLongTracks, maxDurationSec)}`,
-      ...EPHEMERAL_REPLY,
-      allowedMentions: { users: [interaction.user.id] },
-    })
-    .catch(() => null);
+  await sendAutoDeletingEphemeralFollowUp(interaction, {
+    content: `${interactionUserMention(interaction)}, ${buildTooLongTracksNotice(tooLongTracks, maxDurationSec)}`,
+    allowedMentions: { users: [interaction.user.id] },
+  });
 }
 
 function startUrlResolveHeartbeat(progress) {
@@ -1242,7 +1257,10 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         const description = looksLikePlaylist
           ? `В плейлисте нет треков короче ${formatDuration(durationFilter.maxDurationSec)}.`
           : `Трек длиннее ${formatDuration(durationFilter.maxDurationSec)}, поэтому я его не добавил.`;
-        await interaction.editReply({ embeds: [buildActionEmbed(title, description)], components: [] });
+        await clearDeferredReply(interaction);
+        await sendAutoDeletingEphemeralFollowUp(interaction, {
+          embeds: [buildActionEmbed(title, description)],
+        });
         if (looksLikePlaylist) {
           await sendTooLongTracksNotice(interaction, tooLongTracks, durationFilter.maxDurationSec);
         }

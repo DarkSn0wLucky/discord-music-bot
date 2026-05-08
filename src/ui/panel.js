@@ -17,6 +17,7 @@ const SOURCE_EMOJIS = {
   vk: "<:vk_cutout_alpha_smooth2:1500386453136609400>",
   yandex: "<:star_cutout_alpha:1500386482706448384>",
 };
+const PROGRESS_FRAME_STEP_MS = 5_000;
 
 function detectSourceKey(track) {
   const raw = `${String(track?.catalogSource || "")} ${String(track?.source || "")}`.toLowerCase();
@@ -109,6 +110,12 @@ function subtextLine(text) {
   return `-# ${String(text || "").trim()}`;
 }
 
+function noticeMetaLine(actorText) {
+  const timestamp = `<t:${Math.floor(Date.now() / 1000)}:t>`;
+  const actor = String(actorText || "").trim();
+  return subtextLine([`Сегодня, в ${timestamp}`, actor].filter(Boolean).join(" · "));
+}
+
 function compactTitle(track) {
   const rawTitle = safeLinkText(track?.title);
   const author = firstText(track?.artist, track?.author);
@@ -197,6 +204,15 @@ function frameProgressBar(elapsedMs, totalMs) {
   return frames[index];
 }
 
+function steppedProgressMs(elapsedMs, totalMs) {
+  const safeElapsedMs = Math.max(0, Number(elapsedMs) || 0);
+  const safeTotalMs = Number(totalMs) > 0 ? Number(totalMs) : 0;
+  if (safeTotalMs > 0 && safeElapsedMs >= safeTotalMs) {
+    return safeTotalMs;
+  }
+  return Math.floor(safeElapsedMs / PROGRESS_FRAME_STEP_MS) * PROGRESS_FRAME_STEP_MS;
+}
+
 function visualProgressBar(elapsedMs, totalMs, size = 28) {
   const emojiFrame = frameProgressBar(elapsedMs, totalMs);
   if (emojiFrame) {
@@ -265,10 +281,12 @@ function buildPlayerEmbed(player) {
     !isStarting && playbackStatus === "playing" && durationMs > 0 ? Math.min(elapsedMs, durationMs) : elapsedMs;
   const authorLine = trackAuthorLine(track, 46);
   const requestedBy = trackRequesterMention(track);
+  const steppedBarElapsedMs = isStarting ? loadingProgressMs : steppedProgressMs(barElapsedMs, durationMs);
+  const steppedDisplayElapsedMs = isStarting ? loadingElapsedMs : steppedProgressMs(displayElapsedMs, durationMs);
   const progressLine = isStarting
     ? visualProgressBar(loadingProgressMs, 10_000, 12)
-    : visualProgressBar(barElapsedMs, durationMs, 12);
-  const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(displayElapsedMs / 1000);
+    : visualProgressBar(steppedBarElapsedMs, durationMs, 12);
+  const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(steppedDisplayElapsedMs / 1000);
   const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
@@ -292,7 +310,6 @@ function buildPlayerEmbed(player) {
 
 function buildTrackNoticeEmbed(title, track, options = {}) {
   const actorText = String(options.actorText || "").trim();
-  const actionText = String(options.actionText || "").trim();
   const durationSec = Number(track?.durationSec) || 0;
   const authorLine = trackAuthorLine(track, 46);
   const lines = [];
@@ -314,17 +331,11 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
       lines.push(extraText);
     }
   }
-  if (actionText || actorText) {
-    const actorLine = `${actionText || "Запросил"} ${actorText}`.trim();
-    if (actorLine) {
-      lines.push(subtextLine(actorLine));
-    }
-  }
+  lines.push(noticeMetaLine(actorText || trackRequesterMention(track)));
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
-    .setAuthor({ name: title })
-    .setTimestamp(new Date());
+    .setAuthor({ name: title });
   setTrackTitle(embed, track, 48);
   if (lines.length > 0) {
     embed.setDescription(lines.join("\n"));
