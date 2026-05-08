@@ -895,6 +895,9 @@ class GuildMusicPlayer {
 
   async handleTrackEnd() {
     if (!this.currentTrack) {
+      this.forceSkip = false;
+      this.suppressNextTrackAction = false;
+      this.preservePanelOnNextTrack = false;
       if (this.queue.length === 0) {
         this.scheduleAutoDisconnect();
       }
