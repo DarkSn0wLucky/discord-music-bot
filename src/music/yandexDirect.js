@@ -116,7 +116,7 @@ function buildCookieHeader(url, cookiesPath = "") {
 
   const cookies = [];
   for (const line of fs.readFileSync(absolutePath, "utf8").split(/\r?\n/u)) {
-    if (!line || line.startsWith("#")) {
+    if (!line || (line.startsWith("#") && !line.startsWith("#HttpOnly_"))) {
       continue;
     }
 
