@@ -29,6 +29,7 @@ const { buildActionEmbed, buildPanelComponents, buildPlayerEmbed, buildQueueEmbe
 const { resolveSearchCandidates } = require("./resolveTrack");
 const { resolveYandexDirectStreamUrl } = require("./yandexDirect");
 const { buildYtDlpEnv } = require("./ytdlpEnv");
+const { reportPlaybackFailure } = require("../diagnostics/playbackDiagnostics");
 const { formatDuration, safeLinkText } = require("../utils/format");
 
 const COOKIES_PATH_CACHE_TTL_MS = 30_000;
@@ -785,6 +786,12 @@ class GuildMusicPlayer {
           return;
         } catch (error) {
           console.error(`[Play Error] ${next.title}: ${error.message}`);
+          reportPlaybackFailure({
+            error,
+            track: next,
+            guildId: this.guild.id,
+            queueLength: this.queue.length,
+          });
           this.cleanupActiveStreamProcess();
           this.currentTrack = null;
           this.transitionStartedAt = null;

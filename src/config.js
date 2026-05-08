@@ -1,6 +1,6 @@
 const dotenv = require("dotenv");
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 function asNumber(value, fallback) {
   if (value === undefined || value === null || value === "") {
@@ -120,6 +120,14 @@ module.exports = {
   DEFAULT_VOLUME: asNumber(process.env.DEFAULT_VOLUME, 0.75),
   GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
   GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-3-flash-preview",
+  PLAYBACK_DIAGNOSTICS_GEMINI_ENABLED: asBoolean(process.env.PLAYBACK_DIAGNOSTICS_GEMINI_ENABLED, true),
+  PLAYBACK_DIAGNOSTICS_GEMINI_COOLDOWN_MS: asNumber(
+    process.env.PLAYBACK_DIAGNOSTICS_GEMINI_COOLDOWN_MS,
+    15 * 60_000
+  ),
+  PLAYBACK_DIAGNOSTICS_GEMINI_MAX_PER_HOUR: asNumber(process.env.PLAYBACK_DIAGNOSTICS_GEMINI_MAX_PER_HOUR, 4),
+  PLAYBACK_DIAGNOSTICS_GEMINI_MODE: process.env.PLAYBACK_DIAGNOSTICS_GEMINI_MODE || "unknown_only",
+  PLAYBACK_DIAGNOSTICS_GEMINI_TIMEOUT_MS: asNumber(process.env.PLAYBACK_DIAGNOSTICS_GEMINI_TIMEOUT_MS, 12_000),
   AI_CHAT_ENABLED: asBoolean(process.env.AI_CHAT_ENABLED, false),
   AI_CHAT_CHANNEL_ID: process.env.AI_CHAT_CHANNEL_ID || "",
   AI_CHAT_CHANNEL_NAME: process.env.AI_CHAT_CHANNEL_NAME || "чатик-🦍",
