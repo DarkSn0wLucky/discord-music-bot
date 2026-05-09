@@ -245,19 +245,13 @@ function visualProgressBar(elapsedMs, totalMs, size = 28) {
 
 function buildQueuePreview(player, limit = 3) {
   const tracks = Array.isArray(player?.queue) ? player.queue.slice(0, limit) : [];
-  const queueText =
-    tracks.length === 0
-      ? "Пусто"
-      : tracks
-          .map((track, index) => `${index + 1}. ${trackTitleLine(track, 46)}`)
-          .join("\n");
-  const playlistUrl = playlistDisplayUrl(player?.currentTrack);
-
-  if (!playlistUrl) {
-    return queueText;
+  if (tracks.length === 0) {
+    return "Пусто";
   }
 
-  return `${queueText}\n\nПлейлист: ${markdownLink("клик", playlistUrl)}`;
+  return tracks
+    .map((track, index) => `${index + 1}. ${trackTitleLine(track, 46)}`)
+    .join("\n");
 }
 
 function buildPlayerEmbed(player) {
@@ -299,13 +293,19 @@ function buildPlayerEmbed(player) {
     : visualProgressBar(steppedBarElapsedMs, durationMs, 12);
   const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(steppedDisplayElapsedMs / 1000);
   const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
+  const playlistUrl = playlistDisplayUrl(track);
+  const sourceMetaLines = [];
+  if (playlistUrl) {
+    sourceMetaLines.push(`Плейлист: ${markdownLink("клик", playlistUrl)}`);
+  }
+  sourceMetaLines.push(subtextLine(`${compactSourceName(track)} · Очередь: ${player.queue.length} · ${requestedBy}`));
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
     .setAuthor({ name: "Сейчас играет" })
     .addFields(
       { name: "TIME", value: `${elapsedText}  ${progressLine}  ${totalText}` },
       { name: "Дальше в очереди", value: buildQueuePreview(player) },
-      { name: "\u200b", value: subtextLine(`${compactSourceName(track)} · Очередь: ${player.queue.length} · ${requestedBy}`) }
+      { name: "\u200b", value: sourceMetaLines.join("\n") }
     );
   setTrackTitle(embed, track, 54);
   if (authorLine) {
