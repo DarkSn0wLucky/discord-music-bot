@@ -7,6 +7,7 @@ const {
   EmbedBuilder,
   MessageFlags,
   ModalBuilder,
+  PermissionFlagsBits,
   StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -44,7 +45,9 @@ const QUEUE_PICKER_NEXT_ID = "music:queue:next";
 const QUEUE_PICKER_CLOSE_ID = "music:queue:close";
 const VOICE_PANEL_PREFIX = "voicepanel";
 const VOICE_PANEL_STATE_TTL_MS = 30 * 60_000;
+const VOICE_PANEL_CHANNEL_OPTIONS_CACHE_TTL_MS = 30_000;
 const voicePanelStateByMessageId = new Map();
+const voicePanelChannelOptionsCacheByGuildId = new Map();
 const queuePickerPageState = new Map();
 const VOICE_PANEL_OWNER_LOGIN = String(process.env.VOICE_PANEL_OWNER_LOGIN || "darksnowlucky")
   .trim()
@@ -729,7 +732,12 @@ function buildVoiceMoveOptions(guild) {
     return [];
   }
 
-  return guild.channels.cache
+  const cached = voicePanelChannelOptionsCacheByGuildId.get(guild.id);
+  if (cached && Date.now() - cached.checkedAt <= VOICE_PANEL_CHANNEL_OPTIONS_CACHE_TTL_MS) {
+    return cached.options;
+  }
+
+  const options = guild.channels.cache
     .filter((channel) => channel && [ChannelType.GuildVoice, ChannelType.GuildStageVoice].includes(channel.type))
     .sort((left, right) => {
       const byPosition = Number(left.rawPosition || 0) - Number(right.rawPosition || 0);
@@ -744,6 +752,12 @@ function buildVoiceMoveOptions(guild) {
       description: channel.type === ChannelType.GuildStageVoice ? "Stage channel" : "Voice channel",
     }))
     .slice(0, 25);
+
+  voicePanelChannelOptionsCacheByGuildId.set(guild.id, {
+    options,
+    checkedAt: Date.now(),
+  });
+  return options;
 }
 
 function buildVoicePanelComponents(ownerId, guild, hasTarget = false) {
@@ -808,7 +822,12 @@ function buildVoicePanelComponents(ownerId, guild, hasTarget = false) {
     new ButtonBuilder()
       .setCustomId(buildVoicePanelCustomId("action", ownerId, "refresh"))
       .setLabel("Обновить")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(buildVoicePanelCustomId("action", ownerId, "kick"))
+      .setLabel("Кик с сервера")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!hasTarget)
   );
 
   return [userRow, actionRow, moveRow, utilityRow];
@@ -851,6 +870,10 @@ async function resolveVoicePanelTargetMember(guild, state) {
 function ensureVoiceTargetForAction(targetMember, actionName) {
   if (!targetMember) {
     return "Сначала выбери участника.";
+  }
+
+  if (actionName === "kick") {
+    return "";
   }
 
   if (!targetMember.voice?.channelId) {
@@ -900,6 +923,24 @@ async function executeVoicePanelAction({ action, targetMember, actor, destinatio
   if (action === "disconnect") {
     await targetMember.voice.setChannel(null, reason);
     return `⛔ ${targetName} отключён от войса.`;
+  }
+
+  if (action === "kick") {
+    const me = targetMember.guild?.members?.me;
+    if (!me?.permissions?.has(PermissionFlagsBits.KickMembers)) {
+      throw new Error("У бота нет права Kick Members.");
+    }
+
+    if (targetMember.id === actor.id) {
+      throw new Error("Нельзя кикнуть себя через панель.");
+    }
+
+    if (!targetMember.kickable) {
+      throw new Error("Не могу кикнуть этого участника из-за ролей или прав Discord.");
+    }
+
+    await targetMember.kick(reason);
+    return `⛔ ${targetName} кикнут с сервера.`;
   }
 
   if (action === "move") {
@@ -976,7 +1017,7 @@ async function handleVoicePanelComponent(interaction) {
   cleanupVoicePanelState();
   const messageId = interaction.message?.id;
   if (!messageId) {
-    await interaction.reply({ content: "Панель не найдена. Запусти /voicepanel снова.", ...EPHEMERAL_REPLY }).catch(() => null);
+    await interaction.reply({ content: "Панель не найдена. Запусти /panel снова.", ...EPHEMERAL_REPLY }).catch(() => null);
     return true;
   }
 
@@ -1107,6 +1148,9 @@ async function handleVoicePanelComponent(interaction) {
         destinationChannel: null,
       });
       state.lastAction = actionText;
+      if (action === "kick") {
+        state.targetUserId = null;
+      }
     } catch (error) {
       state.lastAction = `Ошибка: ${error.message}`;
     }
@@ -1148,7 +1192,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
   if (botVoiceId && botVoiceId !== memberVoice.id) {
     await interaction.reply({
       content:
-        "\u042f \u0443\u0436\u0435 \u0432 \u0434\u0440\u0443\u0433\u043e\u043c \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u043c \u043a\u0430\u043d\u0430\u043b\u0435. \u0417\u0430\u0439\u0434\u0438 \u0442\u0443\u0434\u0430 \u0438\u043b\u0438 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438 \u043f\u043b\u0435\u0435\u0440 \u0447\u0435\u0440\u0435\u0437 `/stop`.",
+        "Я уже в другом голосовом канале. Зайди туда или останови плеер кнопкой «Стоп».",
       ...EPHEMERAL_REPLY,
     });
     return;
@@ -1778,7 +1822,7 @@ async function handleModalSubmit(interaction, manager) {
 }
 
 async function handleChatInput(interaction, manager) {
-  if (interaction.commandName === "voicepanel") {
+  if (interaction.commandName === "panel") {
     await handleVoicePanel(interaction);
     return;
   }
