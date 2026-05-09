@@ -73,6 +73,27 @@ function isDirectCatalogTrack(track) {
   return source.includes("vk") || source.includes("yandex");
 }
 
+function isPlaylistResolveKind(kind) {
+  return String(kind || "").toLowerCase().includes("playlist");
+}
+
+function stampSourcePlaylistInfo(tracks, playlistInfo) {
+  const url = String(playlistInfo?.url || "").trim();
+  if (!url) {
+    return;
+  }
+
+  const title = String(playlistInfo?.title || "").trim();
+  for (const track of Array.isArray(tracks) ? tracks : []) {
+    if (track && typeof track === "object") {
+      track.sourcePlaylistUrl = url;
+      if (title) {
+        track.sourcePlaylistTitle = title;
+      }
+    }
+  }
+}
+
 function normalizePickerText(value) {
   return String(value || "")
     .toLowerCase()
@@ -1172,6 +1193,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       ensurePlayActive();
       const isDirectUrl = isUrlLike(query);
       let tracksToAdd = [];
+      let playlistInfo = null;
 
       if (isDirectUrl) {
         await progress.update(30, "Получаю данные по ссылке");
@@ -1188,6 +1210,13 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         ensurePlayActive();
         await progress.update(62, "Ссылку обработал");
         tracksToAdd = resolved.tracks;
+        if (isPlaylistResolveKind(resolved?.kind) && tracksToAdd.length > 0) {
+          playlistInfo = {
+            url: query,
+            title: resolved?.title || "",
+          };
+          stampSourcePlaylistInfo(tracksToAdd, playlistInfo);
+        }
 
         if (tracksToAdd.length === 1 && tracksToAdd[0]?.searchQuery && !isDirectCatalogTrack(tracksToAdd[0])) {
           const primaryTrack = tracksToAdd[0];
@@ -1245,7 +1274,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       }
 
       stampRequesterDisplayName(tracksToAdd, interaction);
-      const looksLikePlaylist = tracksToAdd.length > 1;
+      const looksLikePlaylist = Boolean(playlistInfo) || tracksToAdd.length > 1;
       const durationFilter = splitTracksByDurationLimit(tracksToAdd);
       const tooLongTracks = durationFilter.tooLong;
       tracksToAdd = durationFilter.accepted;
@@ -1292,7 +1321,13 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
           : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
       await progress.update(95, "Запускаю воспроизведение");
-      const startedNow = await runWithPlayTimeout(player.playIfIdle({ movePanelToBottomOnStart: wasQueueEmpty }));
+      const startedNow = await runWithPlayTimeout(
+        player.playIfIdle({
+          movePanelToBottomOnStart: wasQueueEmpty,
+          trackActionTitle: wasQueueEmpty && playlistInfo ? "Плейлист запущен" : undefined,
+          trackActionDedupePrefix: wasQueueEmpty && playlistInfo ? "playlist-started" : undefined,
+        })
+      );
 
       if (wasQueueEmpty) {
         if (!startedNow) {

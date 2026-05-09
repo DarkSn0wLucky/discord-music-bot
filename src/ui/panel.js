@@ -75,6 +75,11 @@ function trackDisplayUrl(track) {
   return isHttpUrl(url) ? url : "";
 }
 
+function playlistDisplayUrl(track) {
+  const url = firstText(track?.sourcePlaylistUrl, track?.playlistUrl, track?.playlist_url);
+  return isHttpUrl(url) ? url : "";
+}
+
 function authorDisplayUrl(track) {
   const directUrl = firstText(track?.authorUrl, track?.channelUrl, track?.channel_url, track?.uploaderUrl, track?.uploader_url);
   if (isHttpUrl(directUrl)) {
@@ -240,13 +245,19 @@ function visualProgressBar(elapsedMs, totalMs, size = 28) {
 
 function buildQueuePreview(player, limit = 3) {
   const tracks = Array.isArray(player?.queue) ? player.queue.slice(0, limit) : [];
-  if (tracks.length === 0) {
-    return "Пусто";
+  const queueText =
+    tracks.length === 0
+      ? "Пусто"
+      : tracks
+          .map((track, index) => `${index + 1}. ${trackTitleLine(track, 46)}`)
+          .join("\n");
+  const playlistUrl = playlistDisplayUrl(player?.currentTrack);
+
+  if (!playlistUrl) {
+    return queueText;
   }
 
-  return tracks
-    .map((track, index) => `${index + 1}. ${trackTitleLine(track, 46)}`)
-    .join("\n");
+  return `${queueText}\n\nПлейлист: ${markdownLink("клик", playlistUrl)}`;
 }
 
 function buildPlayerEmbed(player) {

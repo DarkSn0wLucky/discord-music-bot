@@ -528,7 +528,13 @@ class GuildMusicPlayer {
   }
 
   async playNext(options = {}) {
-    const { suppressTrackAction = false, preservePanelMessage = false, movePanelToBottomOnStart = false } = options;
+    const {
+      suppressTrackAction = false,
+      preservePanelMessage = false,
+      movePanelToBottomOnStart = false,
+      trackActionTitle = "Трек запущен",
+      trackActionDedupePrefix = "track-started",
+    } = options;
     if (this.transitionLock) return;
 
     this.transitionLock = true;
@@ -772,13 +778,15 @@ class GuildMusicPlayer {
           }
           if (!suppressTrackAction) {
             const requestedBy = next.requestedById ? `<@${next.requestedById}>` : safeLinkText(next.requestedByTag || "unknown");
-            await this.sendAction("Трек запущен", "", {
-              embed: buildTrackNoticeEmbed("Трек запущен", next, {
+            const actionTitle = String(trackActionTitle || "Трек запущен").trim() || "Трек запущен";
+            const dedupePrefix = String(trackActionDedupePrefix || "track-started").trim() || "track-started";
+            await this.sendAction(actionTitle, "", {
+              embed: buildTrackNoticeEmbed(actionTitle, next, {
                 actionText: "Запросил",
                 actorText: requestedBy,
               }),
               allowedMentions: next.requestedById ? { users: [next.requestedById] } : undefined,
-              dedupeKey: `track-started|${next.url || next.title || ""}|${next.requestedById || ""}`,
+              dedupeKey: `${dedupePrefix}|${next.url || next.title || ""}|${next.requestedById || ""}`,
             });
           }
           await this.refreshPanel();
