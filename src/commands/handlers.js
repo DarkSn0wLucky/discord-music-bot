@@ -1192,7 +1192,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
   if (botVoiceId && botVoiceId !== memberVoice.id) {
     await interaction.reply({
       content:
-        "Я уже в другом голосовом канале. Зайди туда или останови плеер кнопкой «Стоп».",
+        "Я уже в другом голосовом канале.",
       ...EPHEMERAL_REPLY,
     });
     return;
