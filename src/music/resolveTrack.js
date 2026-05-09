@@ -272,8 +272,18 @@ function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
     return "";
   }
 
-  const cookies = readCookiesFromFile(cookiesPath);
-  if (!cookies.length) {
+  return buildCookieHeaderFromCookies(parsed.toString(), readCookiesFromFile(cookiesPath));
+}
+
+function buildCookieHeaderFromCookies(url, cookies) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || "").trim());
+  } catch {
+    return "";
+  }
+
+  if (!Array.isArray(cookies) || cookies.length === 0) {
     return "";
   }
 
@@ -304,6 +314,108 @@ function buildCookieHeaderForUrl(url, explicitCookiesPath = "") {
   }
 
   return [...map.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+function createRequestCookieJar(cookiesPath, url = "") {
+  const absolutePath = resolveExistingFilePath(cookiesPath) || getCookiePathForUrl(url);
+  if (!absolutePath) {
+    return [];
+  }
+
+  return readCookiesFromFile(absolutePath).map((cookie) => ({ ...cookie }));
+}
+
+function parseSetCookieHeader(header, responseUrl) {
+  const raw = String(header || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(responseUrl || "").trim());
+  } catch {
+    return null;
+  }
+
+  const parts = raw.split(";").map((part) => part.trim()).filter(Boolean);
+  const nameValue = parts.shift() || "";
+  const separatorIndex = nameValue.indexOf("=");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const cookie = {
+    domain: normalizeCookieDomain(parsedUrl.hostname),
+    includeSubdomains: false,
+    path: "/",
+    secure: false,
+    name: nameValue.slice(0, separatorIndex).trim(),
+    value: nameValue.slice(separatorIndex + 1),
+    expired: false,
+  };
+
+  for (const attribute of parts) {
+    const [rawName, ...rawValueParts] = attribute.split("=");
+    const attributeName = String(rawName || "").trim().toLowerCase();
+    const attributeValue = rawValueParts.join("=").trim();
+    if (attributeName === "domain") {
+      cookie.domain = normalizeCookieDomain(attributeValue);
+      cookie.includeSubdomains = true;
+    } else if (attributeName === "path") {
+      cookie.path = attributeValue || "/";
+    } else if (attributeName === "secure") {
+      cookie.secure = true;
+    } else if (attributeName === "max-age" && Number(attributeValue) <= 0) {
+      cookie.expired = true;
+    } else if (attributeName === "expires" && Number.isFinite(Date.parse(attributeValue))) {
+      cookie.expired = Date.parse(attributeValue) <= Date.now();
+    }
+  }
+
+  return cookie.domain && cookie.name ? cookie : null;
+}
+
+function updateRequestCookieJar(cookieJar, setCookieHeaders, responseUrl) {
+  if (!Array.isArray(cookieJar) || !setCookieHeaders) {
+    return;
+  }
+
+  const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+  for (const header of headers) {
+    const cookie = parseSetCookieHeader(header, responseUrl);
+    if (!cookie) {
+      continue;
+    }
+
+    const existingIndex = cookieJar.findIndex((entry) =>
+      entry?.name === cookie.name &&
+      normalizeCookieDomain(entry?.domain) === cookie.domain &&
+      String(entry?.path || "/") === String(cookie.path || "/")
+    );
+
+    if (cookie.expired) {
+      if (existingIndex >= 0) {
+        cookieJar.splice(existingIndex, 1);
+      }
+      continue;
+    }
+
+    const cleanCookie = {
+      domain: cookie.domain,
+      includeSubdomains: cookie.includeSubdomains,
+      path: cookie.path || "/",
+      secure: cookie.secure,
+      name: cookie.name,
+      value: cookie.value,
+    };
+
+    if (existingIndex >= 0) {
+      cookieJar[existingIndex] = cleanCookie;
+    } else {
+      cookieJar.push(cleanCookie);
+    }
+  }
 }
 
 function hasVkAuthenticatedCookies(cookiesPath) {
@@ -2103,6 +2215,7 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   const headers = options.headers || {};
   const method = String(options.method || "GET").trim().toUpperCase() || "GET";
   const body = options.body === undefined || options.body === null ? null : Buffer.from(String(options.body));
+  const cookieJar = Array.isArray(options.cookieJar) ? options.cookieJar : createRequestCookieJar(options.cookiesPath || "", url);
 
   let parsedUrl;
   try {
@@ -2122,7 +2235,8 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
   const runRequest = (forcedLocalAddress = "") =>
     new Promise((resolve, reject) => {
       const client = parsedUrl.protocol === "http:" ? http : https;
-      const cookieHeader = buildCookieHeaderForUrl(parsedUrl.toString(), options.cookiesPath || "");
+      const cookieHeader = buildCookieHeaderFromCookies(parsedUrl.toString(), cookieJar) ||
+        buildCookieHeaderForUrl(parsedUrl.toString(), options.cookiesPath || "");
       const normalizedHeaders = { ...headers };
       if (cookieHeader && !normalizedHeaders.cookie && !normalizedHeaders.Cookie) {
         normalizedHeaders.cookie = cookieHeader;
@@ -2142,6 +2256,7 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
 
       const req = client.request(parsedUrl, requestOptions, (res) => {
         const statusCode = Number(res.statusCode) || 0;
+        updateRequestCookieJar(cookieJar, res.headers["set-cookie"], parsedUrl.toString());
         const location = String(res.headers.location || "");
         if (location && statusCode >= 300 && statusCode < 400 && redirectCount < maxRedirects) {
           const nextUrl = new URL(location, parsedUrl).toString();
@@ -2150,6 +2265,7 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
             nextUrl,
             {
               ...options,
+              cookieJar,
               localAddress: forcedLocalAddress || options.localAddress || "",
             },
             redirectCount + 1
@@ -2162,10 +2278,18 @@ async function requestTextWithRedirect(url, options = {}, redirectCount = 0) {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
         res.on("end", () => {
-          const body = Buffer.concat(chunks).toString("utf8");
+          const buffer = Buffer.concat(chunks);
+          const contentType = String(res.headers["content-type"] || "").toLowerCase();
+          const charset = contentType.match(/\bcharset=([^;]+)/i)?.[1]?.trim() || "utf-8";
+          let responseBody = "";
+          try {
+            responseBody = new TextDecoder(charset).decode(buffer);
+          } catch {
+            responseBody = buffer.toString("utf8");
+          }
           resolve({
             statusCode,
-            body,
+            body: responseBody,
             finalUrl: parsedUrl.toString(),
             headers: res.headers,
           });
@@ -3342,11 +3466,13 @@ function normalizeVkPlayableAudioUrl(rawUrl, decoderVkId = 0) {
 }
 
 function isVkAudioFieldArray(value) {
-  return Array.isArray(value) && value.length >= 6 && (
-    Number.isFinite(Number(value[0])) ||
-    Number.isFinite(Number(value[1])) ||
-    typeof value[2] === "string"
-  );
+  return Array.isArray(value) &&
+    value.length >= 6 &&
+    Number.isFinite(Number(value[0])) &&
+    Number.isFinite(Number(value[1])) &&
+    typeof value[2] === "string" &&
+    (typeof value[3] === "string" || typeof value[4] === "string") &&
+    Number.isFinite(Number(value[5]));
 }
 
 function collectVkAudioPayloadItems(payload) {
@@ -3469,6 +3595,71 @@ function extractVkAudioEntriesFromHtml(html) {
   return vkAudioPayloadItemsToExtractorEntries(payloadItems);
 }
 
+function extractJsonArrayAt(source, openBracketIndex) {
+  const text = String(source || "");
+  if (openBracketIndex < 0 || text[openBracketIndex] !== "[") {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = openBracketIndex; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"' || character === "'") {
+      inString = true;
+      quote = character;
+      continue;
+    }
+
+    if (character === "[") {
+      depth += 1;
+    } else if (character === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(openBracketIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractVkFirstAudioPayloadItemsFromHtml(html) {
+  const source = decodeHtmlEntities(html);
+  const items = [];
+  const pattern = /["']firstAudio["']\s*:\s*\[/giu;
+  let match;
+
+  while ((match = pattern.exec(source))) {
+    const openBracketIndex = source.indexOf("[", match.index);
+    const arrayText = extractJsonArrayAt(source, openBracketIndex);
+    if (!arrayText) {
+      continue;
+    }
+
+    const parsed = parseJsonPayload(arrayText);
+    if (isVkAudioFieldArray(parsed)) {
+      items.push(parsed);
+    }
+  }
+
+  return items;
+}
+
 function extractVkAudioPayloadItemsFromHtml(html) {
   const items = [];
   const source = String(html || "");
@@ -3484,6 +3675,19 @@ function extractVkAudioPayloadItemsFromHtml(html) {
 
     items.push(...collectVkAudioPayloadItems(parsed));
   }
+
+  const execPattern = /\bdata-exec=(["'])([\s\S]*?)\1/giu;
+  while ((match = execPattern.exec(source))) {
+    const decodedPayload = decodeHtmlEntities(match[2]);
+    const parsed = parseJsonPayload(decodedPayload);
+    if (!parsed) {
+      continue;
+    }
+
+    items.push(...collectVkAudioPayloadItemsDeep(parsed));
+  }
+
+  items.push(...extractVkFirstAudioPayloadItemsFromHtml(source));
 
   return items;
 }
@@ -3703,7 +3907,7 @@ function setCachedVkReloadEntry(reloadId, entry) {
   });
 }
 
-async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath) {
+async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath, options = {}) {
   const reloadIds = [];
   const seenReloadIds = new Set();
   for (const item of (Array.isArray(payloadItems) ? payloadItems : [])) {
@@ -3750,6 +3954,7 @@ async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath) {
         body,
         timeoutMs: 20_000,
         cookiesPath,
+        cookieJar: options.cookieJar,
         headers: {
           "user-agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -3851,6 +4056,76 @@ function parseVkPlaylistInfoFromUrl(value) {
   } catch {
     return null;
   }
+}
+
+function parseVkAudioInfoFromUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    const directAudioId = parsed.searchParams.get("audio_id") || parsed.searchParams.get("audio");
+    if (directAudioId) {
+      const [ownerId, audioId, accessHash = ""] = String(directAudioId).split("_");
+      if (ownerId && audioId) {
+        return {
+          ownerId,
+          audioId,
+          accessHash:
+            safeDecodeURIComponent(accessHash) ||
+            parsed.searchParams.get("access_hash") ||
+            parsed.searchParams.get("hash") ||
+            "",
+        };
+      }
+    }
+
+    const texts = [
+      `${parsed.pathname}${parsed.search}`,
+      parsed.searchParams.get("z"),
+      parsed.searchParams.get("w"),
+      parsed.hash,
+    ]
+      .map((item) => safeDecodeURIComponent(item || ""))
+      .filter(Boolean);
+
+    for (const text of texts) {
+      const match = text.match(/(?:^|[/?#&=])audio(-?\d+)_(\d+)(?:_([^/?&#]+))?/iu);
+      if (!match?.[1] || !match?.[2]) {
+        continue;
+      }
+
+      return {
+        ownerId: match[1],
+        audioId: match[2],
+        accessHash:
+          safeDecodeURIComponent(match[3] || "") ||
+          parsed.searchParams.get("access_hash") ||
+          parsed.searchParams.get("hash") ||
+          "",
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildVkDirectAudioUrl(info, host = "vk.com") {
+  if (!info?.ownerId || !info?.audioId) {
+    return "";
+  }
+
+  const normalizedHost = isVkMusicHost(host) ? String(host || "vk.com").toLowerCase() : "vk.com";
+  const hashSuffix = info.accessHash ? `_${encodeURIComponent(info.accessHash)}` : "";
+  return `https://${normalizedHost}/audio${info.ownerId}_${info.audioId}${hashSuffix}`;
+}
+
+function filterVkPayloadItemsByAudioInfo(payloadItems, audioInfo) {
+  if (!audioInfo?.ownerId || !audioInfo?.audioId) {
+    return [];
+  }
+
+  const targetId = `${audioInfo.ownerId}_${audioInfo.audioId}`;
+  return (Array.isArray(payloadItems) ? payloadItems : []).filter((item) => vkAudioPayloadId(item) === targetId);
 }
 
 function buildVkMobilePlaylistUrl(info, offset = 0, hashParam = "api_view") {
@@ -4140,6 +4415,140 @@ async function fetchVkPlaylistSectionItems(playlistInfo, cookiesPath, sourceUrl)
     title,
     totalItems,
     sourceUrl: buildVkMobilePlaylistUrl(playlistInfo) || sourceUrl || "https://m.vk.com/audio",
+  };
+}
+
+async function fetchVkDirectAudioSectionItems(audioInfo, cookiesPath, sourceUrl) {
+  if (!audioInfo?.ownerId || !audioInfo?.audioId) {
+    return null;
+  }
+
+  let parsedSource = null;
+  try {
+    parsedSource = new URL(String(sourceUrl || "").trim());
+  } catch {
+    parsedSource = null;
+  }
+
+  const host = isVkMusicHost(parsedSource?.hostname) ? parsedSource.hostname.toLowerCase() : "vk.com";
+  const directUrl = buildVkDirectAudioUrl(audioInfo, host) || sourceUrl || "https://vk.com/audio";
+  const cookieJar = createRequestCookieJar(cookiesPath, directUrl);
+
+  await requestTextWithRedirect(directUrl, {
+    timeoutMs: 20_000,
+    cookiesPath,
+    cookieJar,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://vk.com/",
+    },
+  }).catch(() => null);
+
+  const origins = [...new Set([
+    `https://${host}`,
+    host === "vk.com" ? "https://vk.ru" : "https://vk.com",
+  ])];
+
+  for (const origin of origins) {
+    const endpoint = `${origin}/al_audio.php`;
+    const refererHost = new URL(origin).hostname;
+    const referer = buildVkDirectAudioUrl(audioInfo, refererHost) || directUrl;
+
+    for (let attempt = 0; attempt <= VK_LOAD_SECTION_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        await delayMs(VK_LOAD_SECTION_RETRY_DELAY_MS * attempt);
+      }
+
+      const body = new URLSearchParams({
+        act: "track",
+        owner_id: String(audioInfo.ownerId),
+        audio_id: String(audioInfo.audioId),
+        hash: String(audioInfo.accessHash || ""),
+        al: "1",
+      });
+
+      const response = await requestTextWithRedirect(endpoint, {
+        method: "POST",
+        body: body.toString(),
+        timeoutMs: 20_000,
+        cookiesPath,
+        cookieJar,
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+          accept: "application/json,text/plain,*/*",
+          "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "x-requested-with": "XMLHttpRequest",
+          origin,
+          referer,
+        },
+      }).catch(() => null);
+
+      if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+        continue;
+      }
+
+      const bodyText = String(response.body || "").replace(/^<!--\s*/u, "");
+      const parsed = parseJsonPayload(bodyText);
+      const allPayloadItems = parsed
+        ? collectVkAudioPayloadItemsDeep(parsed)
+        : extractVkAudioPayloadItemsFromHtml(bodyText);
+      const payloadItems = filterVkPayloadItemsByAudioInfo(allPayloadItems, audioInfo);
+
+      if (payloadItems.length > 0) {
+        return {
+          payloadItems,
+          sourceUrl: referer,
+          cookieJar,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function resolveVkDirectAudioUrl(url, requestedBy, cookiesPath) {
+  const audioInfo = parseVkAudioInfoFromUrl(url);
+  if (!audioInfo) {
+    return null;
+  }
+
+  const sectionData = await fetchVkDirectAudioSectionItems(audioInfo, cookiesPath, url);
+  const payloadItems = Array.isArray(sectionData?.payloadItems) ? sectionData.payloadItems : [];
+  if (payloadItems.length === 0) {
+    return null;
+  }
+
+  const directEntries = vkAudioPayloadItemsToExtractorEntries(payloadItems);
+  const reloadedEntries = directEntries.length > 0
+    ? []
+    : await fetchVkReloadAudioEntries(payloadItems, sectionData?.sourceUrl || url, cookiesPath, {
+        cookieJar: sectionData?.cookieJar,
+      });
+  const entries = mergeVkExtractorEntriesByPayloadOrder(payloadItems, directEntries, reloadedEntries);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const tracks = entries
+    .map((entry) => toVkTrack(entry, requestedBy, url, { allowFallbackUrl: false }))
+    .filter((track) => track?.url);
+
+  if (tracks.length === 0) {
+    return null;
+  }
+
+  return {
+    tracks: tracks.slice(0, 1),
+    kind: "vk_track",
+    title: tracks[0]?.title || "VK Music",
+    totalItems: 1,
+    expectedItems: 1,
   };
 }
 
@@ -4640,8 +5049,11 @@ async function resolveVkUrl(url, requestedBy) {
   const normalizedUrl = normalizeVkMusicUrl(url);
   const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
   const playlistLike = isVkPlaylistLikeUrl(normalizedUrl);
+  const directAudioLike = !playlistLike && Boolean(parseVkAudioInfoFromUrl(normalizedUrl));
   const htmlResolved = playlistLike
     ? await resolveVkUrlViaHtml(normalizedUrl, requestedBy, cookiesPath)
+    : directAudioLike
+      ? await resolveVkDirectAudioUrl(normalizedUrl, requestedBy, cookiesPath)
     : null;
 
   if (htmlResolved) {
