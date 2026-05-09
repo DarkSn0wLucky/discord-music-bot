@@ -366,7 +366,6 @@ function buildPlaylistNoticeEmbed(title, playlist, options = {}) {
   const trackCount = Math.max(0, Math.floor(Number(playlist?.trackCount) || 0));
   const durationSec = Math.max(0, Number(playlist?.durationSec) || 0);
   const lines = [
-    `Плейлист: ${markdownLink("клик", playlistUrl)}`,
     `Треков: **${trackCount}**`,
     `Длительность: **${durationSec > 0 ? formatDuration(durationSec) : "--:--"}**`,
   ];
