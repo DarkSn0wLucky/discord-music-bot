@@ -608,7 +608,25 @@ function isYandexMusicHost(hostname) {
 
 function isVkMusicHost(hostname) {
   const host = String(hostname || "").toLowerCase();
-  return host === "vk.com" || host === "m.vk.com" || host.endsWith(".vk.com");
+  return host === "vk.com" || host === "vk.ru" || host === "m.vk.com" || host.endsWith(".vk.com");
+}
+
+function normalizeVkMusicUrl(value) {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    if (!isVkMusicHost(parsed.hostname)) {
+      return String(value || "").trim();
+    }
+
+    parsed.protocol = "https:";
+    if (parsed.hostname.toLowerCase() === "vk.ru") {
+      parsed.hostname = "vk.com";
+    }
+
+    return parsed.toString();
+  } catch {
+    return String(value || "").trim();
+  }
 }
 
 function isPrivateIPv4(address) {
@@ -4619,10 +4637,11 @@ async function resolveVkUrl(url, requestedBy) {
     return null;
   }
 
+  const normalizedUrl = normalizeVkMusicUrl(url);
   const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
-  const playlistLike = isVkPlaylistLikeUrl(url);
+  const playlistLike = isVkPlaylistLikeUrl(normalizedUrl);
   const htmlResolved = playlistLike
-    ? await resolveVkUrlViaHtml(url, requestedBy, cookiesPath)
+    ? await resolveVkUrlViaHtml(normalizedUrl, requestedBy, cookiesPath)
     : null;
 
   if (htmlResolved) {
@@ -4631,13 +4650,13 @@ async function resolveVkUrl(url, requestedBy) {
 
   let ytdlpResolved = null;
   if (!playlistLike || shouldTryVkYtDlpAfterHtml(htmlResolved)) {
-    const vkJson = await fetchYtDlpJson(url, {
+    const vkJson = await fetchYtDlpJson(normalizedUrl, {
       timeoutMs: 30_000,
       cookiesPath,
       flatPlaylist: false,
       playlistEnd: MAX_PLAYLIST_ITEMS,
     }).catch(() => null);
-    ytdlpResolved = vkYtDlpJsonToResolved(vkJson, requestedBy, url);
+    ytdlpResolved = vkYtDlpJsonToResolved(vkJson, requestedBy, normalizedUrl);
   }
 
   if (ytdlpResolved) {
@@ -4645,7 +4664,7 @@ async function resolveVkUrl(url, requestedBy) {
   }
 
   if (!playlistLike) {
-    return resolveVkUrlViaHtml(url, requestedBy, cookiesPath);
+    return resolveVkUrlViaHtml(normalizedUrl, requestedBy, cookiesPath);
   }
 
   return null;
@@ -4995,7 +5014,7 @@ async function resolveTracks(query, requestedBy) {
     if (isVkMusicUrl) {
       const vkCookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
       const cookieHint = hasVkAuthenticatedCookies(vkCookiesPath)
-        ? "Проверь, что VK cookies файл (VK_COOKIES_PATH) свежий и у аккаунта есть доступ к этому плейлисту."
+        ? "Проверь, что VK cookies файл (VK_COOKIES_PATH) свежий и у аккаунта есть доступ к этому треку или плейлисту."
         : "В VK_COOKIES_PATH нет авторизационных cookies VK (remixsid/remixsid6). Обнови cookies из залогиненного VK аккаунта, иначе закрытые и часть расшаренных плейлистов VK не отдаются.";
       throw new Error(
         `\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c VK Music \u0441\u0441\u044b\u043b\u043a\u0443 \u043a\u0430\u043a \u043f\u0440\u044f\u043c\u043e\u0439 VK-\u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a. YouTube fallback \u0434\u043b\u044f VK \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d, \u0447\u0442\u043e\u0431\u044b \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u044f\u0442\u044c \u0441\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0435 \u0442\u0440\u0435\u043a\u0438. ${cookieHint}`
