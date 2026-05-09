@@ -14,7 +14,14 @@ const {
 } = require("discord.js");
 const { MAX_TRACK_DURATION_SEC, MUSIC_TEXT_CHANNEL_ID, MUSIC_TEXT_CHANNEL_NAME } = require("../config");
 const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrack");
-const { BUTTON_IDS, buildActionEmbed, buildPlayerEmbed, buildQueueEmbed, buildTrackNoticeEmbed } = require("../ui/panel");
+const {
+  BUTTON_IDS,
+  buildActionEmbed,
+  buildPlayerEmbed,
+  buildPlaylistNoticeEmbed,
+  buildQueueEmbed,
+  buildTrackNoticeEmbed,
+} = require("../ui/panel");
 const { formatDuration, loopLabel, safeLinkText, truncate } = require("../utils/format");
 
 const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
@@ -390,6 +397,10 @@ function trackDurationSec(track) {
   }
 
   return 0;
+}
+
+function tracksDurationSec(tracks) {
+  return (Array.isArray(tracks) ? tracks : []).reduce((total, track) => total + trackDurationSec(track), 0);
 }
 
 function splitTracksByDurationLimit(tracks) {
@@ -1186,6 +1197,15 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
     HAS_PLAY_REQUEST_TIMEOUT
       ? withPromiseTimeout(promise, PLAY_REQUEST_TIMEOUT_MS, buildPlayTimeoutError)
       : Promise.resolve(promise);
+  let deferredReplyCleared = false;
+
+  const clearProgressReply = async () => {
+    clearThinkingTimer();
+    progress.stop();
+    await progress.wait();
+    await clearDeferredReply(interaction);
+    deferredReplyCleared = true;
+  };
 
   await enqueuePlayRequest(interaction.guild.id, async () => {
     try {
@@ -1214,6 +1234,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           playlistInfo = {
             url: query,
             title: resolved?.title || "",
+            sourceTrackCount: Number(resolved?.totalItems || resolved?.expectedItems || tracksToAdd.length) || tracksToAdd.length,
           };
           stampSourcePlaylistInfo(tracksToAdd, playlistInfo);
         }
@@ -1305,7 +1326,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
 
       await progress.update(85, "Добавляю трек в очередь");
       ensurePlayActive();
-      const { accepted, dropped } = player.addTracks(tracksToAdd);
+      const { accepted, dropped, acceptedTracks, acceptedDurationSec } = player.addTracks(tracksToAdd);
       if (accepted === 0) {
         clearThinkingTimer();
         progress.stop();
@@ -1316,15 +1337,36 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       }
 
       const first = tracksToAdd[0];
+      const playlistNotice = playlistInfo
+        ? {
+            title: playlistInfo.title || "Плейлист",
+            url: playlistInfo.url,
+            trackCount: accepted,
+            durationSec: Number(acceptedDurationSec) || tracksDurationSec(acceptedTracks),
+          }
+        : null;
       const summary =
         accepted === 1
           ? `[${safeLinkText(first.title)}](${first.url}) \u00b7 ${formatDuration(first.durationSec)}`
           : `\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0442\u0440\u0435\u043a\u043e\u0432: ${accepted}`;
-      await progress.update(95, "Запускаю воспроизведение");
+      const dropHint =
+        dropped > 0 ? `\n\u041d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0438\u0437-\u0437\u0430 \u043b\u0438\u043c\u0438\u0442\u0430 \u043e\u0447\u0435\u0440\u0435\u0434\u0438: ${dropped}` : "";
+      const requestedBy = first?.requestedById ? `<@${first.requestedById}>` : safeLinkText(first?.requestedByTag || "unknown");
+      if (wasQueueEmpty) {
+        await clearProgressReply();
+      } else {
+        await progress.update(95, "Запускаю воспроизведение");
+      }
       const startedNow = await runWithPlayTimeout(
         player.playIfIdle({
           movePanelToBottomOnStart: wasQueueEmpty,
           trackActionTitle: wasQueueEmpty && playlistInfo ? "Плейлист запущен" : undefined,
+          trackActionEmbed: wasQueueEmpty && playlistNotice
+            ? buildPlaylistNoticeEmbed("Плейлист запущен", playlistNotice, {
+                actorText: requestedBy,
+                extraText: dropHint,
+              })
+            : undefined,
           trackActionDedupePrefix: wasQueueEmpty && playlistInfo ? "playlist-started" : undefined,
         })
       );
@@ -1333,24 +1375,23 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         if (!startedNow) {
           await movePlayerPanelBelowActions(player);
         }
-        clearThinkingTimer();
-        progress.stop();
-        await clearDeferredReply(interaction);
         if (looksLikePlaylist) {
           await sendTooLongTracksNotice(interaction, tooLongTracks, durationFilter.maxDurationSec);
         }
         return;
       }
 
-      const dropHint =
-        dropped > 0 ? `\n\u041d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0438\u0437-\u0437\u0430 \u043b\u0438\u043c\u0438\u0442\u0430 \u043e\u0447\u0435\u0440\u0435\u0434\u0438: ${dropped}` : "";
-      const requestedBy = first?.requestedById ? `<@${first.requestedById}>` : safeLinkText(first?.requestedByTag || "unknown");
       await progress.update(100, "Готово");
       clearThinkingTimer();
       progress.stop();
       await interaction.editReply({
         embeds: [
-          accepted === 1
+          playlistNotice
+            ? buildPlaylistNoticeEmbed("Плейлист добавлен", playlistNotice, {
+                actorText: requestedBy,
+                extraText: dropHint,
+              })
+            : accepted === 1
             ? buildTrackNoticeEmbed("Трек добавлен!", first, {
                 actionText: "Добавил",
                 actorText: requestedBy,
@@ -1393,7 +1434,11 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
       clearThinkingTimer();
       progress.stop();
       console.error("[Command:/play]", { query }, error);
-      await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`);
+      if (deferredReplyCleared) {
+        await interaction.followUp(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`).catch(() => null);
+      } else {
+        await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`).catch(() => null);
+      }
     } finally {
       clearThinkingTimer();
       progress.stop();

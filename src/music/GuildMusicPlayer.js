@@ -474,6 +474,8 @@ class GuildMusicPlayer {
       accepted: acceptedTracks.length,
       dropped: allowedTracks.length - acceptedTracks.length,
       tooLong: tooLongTracks.length,
+      acceptedTracks,
+      acceptedDurationSec: acceptedTracks.reduce((total, track) => total + trackDurationSec(track), 0),
     };
   }
 
@@ -533,6 +535,7 @@ class GuildMusicPlayer {
       preservePanelMessage = false,
       movePanelToBottomOnStart = false,
       trackActionTitle = "Трек запущен",
+      trackActionEmbed = null,
       trackActionDedupePrefix = "track-started",
     } = options;
     if (this.transitionLock) return;
@@ -781,10 +784,12 @@ class GuildMusicPlayer {
             const actionTitle = String(trackActionTitle || "Трек запущен").trim() || "Трек запущен";
             const dedupePrefix = String(trackActionDedupePrefix || "track-started").trim() || "track-started";
             await this.sendAction(actionTitle, "", {
-              embed: buildTrackNoticeEmbed(actionTitle, next, {
-                actionText: "Запросил",
-                actorText: requestedBy,
-              }),
+              embed:
+                trackActionEmbed ||
+                buildTrackNoticeEmbed(actionTitle, next, {
+                  actionText: "Запросил",
+                  actorText: requestedBy,
+                }),
               allowedMentions: next.requestedById ? { users: [next.requestedById] } : undefined,
               dedupeKey: `${dedupePrefix}|${next.url || next.title || ""}|${next.requestedById || ""}`,
             });

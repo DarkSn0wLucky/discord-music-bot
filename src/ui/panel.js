@@ -359,6 +359,40 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
   return embed;
 }
 
+function buildPlaylistNoticeEmbed(title, playlist, options = {}) {
+  const actorText = String(options.actorText || "").trim();
+  const playlistTitle = truncate(safeLinkText(playlist?.title || "Плейлист"), 64);
+  const playlistUrl = firstText(playlist?.url, playlist?.sourcePlaylistUrl, playlist?.playlistUrl);
+  const trackCount = Math.max(0, Math.floor(Number(playlist?.trackCount) || 0));
+  const durationSec = Math.max(0, Number(playlist?.durationSec) || 0);
+  const lines = [
+    `Плейлист: ${markdownLink("клик", playlistUrl)}`,
+    `Треков: **${trackCount}**`,
+    `Длительность: **${durationSec > 0 ? formatDuration(durationSec) : "--:--"}**`,
+  ];
+
+  if (options.extraText) {
+    const extraText = String(options.extraText).trim();
+    if (extraText) {
+      lines.push(extraText);
+    }
+  }
+
+  lines.push(noticeMetaLine(actorText));
+
+  const embed = new EmbedBuilder()
+    .setColor(EMBED_COLOR_HEX)
+    .setAuthor({ name: title })
+    .setTitle(playlistTitle)
+    .setDescription(lines.join("\n"));
+
+  if (isHttpUrl(playlistUrl)) {
+    embed.setURL(playlistUrl);
+  }
+
+  return embed;
+}
+
 function buildControlsRow(player) {
   const idle = !player.currentTrack && player.queue.length === 0;
   const pauseLabel = player.isPaused() ? "Продолжить" : "Пауза";
@@ -464,5 +498,6 @@ module.exports = {
   buildQueueEmbed,
   buildActionEmbed,
   buildTrackNoticeEmbed,
+  buildPlaylistNoticeEmbed,
   trackDisplayUrl,
 };
