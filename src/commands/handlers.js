@@ -1746,7 +1746,7 @@ async function handleStop(interaction, manager) {
     await interaction.deleteReply().catch(() => null);
     await interaction
       .followUp({
-        embeds: [buildNoticeEmbed("Плеер остановлен", "Плеер остановлен.", interactionUserMention(interaction))],
+        embeds: [buildNoticeEmbed("Плеер остановлен", "", interactionUserMention(interaction))],
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);
@@ -1955,7 +1955,7 @@ async function handleButton(interaction, manager) {
     if (result.ok) {
       await interaction
         .followUp({
-          embeds: [buildNoticeEmbed("Плеер остановлен", "Плеер остановлен.", interactionUserMention(interaction))],
+          embeds: [buildNoticeEmbed("Плеер остановлен", "", interactionUserMention(interaction))],
           allowedMentions: { users: [interaction.user.id] },
         })
         .catch(() => null);
