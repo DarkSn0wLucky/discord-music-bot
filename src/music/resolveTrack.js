@@ -457,6 +457,19 @@ function delayMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = EXTERNAL_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || EXTERNAL_FETCH_TIMEOUT_MS));
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function safeDecodeURIComponent(value) {
   const raw = String(value || "").trim();
   if (!raw) {
@@ -1079,7 +1092,7 @@ async function fetchYouTubeApiVideoItems(videoIds) {
     maxResults: String(ids.length),
   });
 
-  const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
+  const response = await fetchWithTimeout(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
   if (!response.ok) {
     return [];
   }
@@ -1234,7 +1247,7 @@ async function searchYoutubeByApi(query, options = {}) {
     key: YOUTUBE_API_KEY,
   });
 
-  const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+  const response = await fetchWithTimeout(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
   if (!response.ok) {
     return [];
   }

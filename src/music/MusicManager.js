@@ -6,7 +6,15 @@ const { GuildMusicPlayer } = require("./GuildMusicPlayer");
 
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const IDLE_PANEL_BUMP_AFTER_MESSAGE_MS = 60_000;
+const IDLE_PANEL_PERIODIC_CHECK_MS = 30 * 60_000;
 const QUICKPLAY_BUTTON_ID = "music:quickplay";
+
+function unrefTimer(timer) {
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return timer;
+}
 
 function normalizeChannelName(value) {
   return String(value || "")
@@ -255,7 +263,7 @@ class MusicManager {
       clearTimeout(this.idlePanelBumpTimeouts.get(guild.id));
     }
 
-    const timeout = setTimeout(async () => {
+    const timeout = unrefTimer(setTimeout(async () => {
       this.idlePanelBumpTimeouts.delete(guild.id);
 
       const channel = await this.resolveMusicTextChannel(guild).catch(() => null);
@@ -268,22 +276,30 @@ class MusicManager {
       }
 
       await this.ensureIdlePanelForGuild(guild, { moveToBottom: true }).catch(() => null);
-    }, waitMs);
+    }, waitMs));
 
     this.idlePanelBumpTimeouts.set(guild.id, timeout);
   }
 
   startIdlePanelBumpTask() {
     this.stopIdlePanelBumpTask();
+    this.idlePanelBumpTimer = unrefTimer(setInterval(() => {
+      this.ensureIdlePanels().catch((error) => {
+        console.warn("[MusicManager] Idle panel periodic check failed:", error.message);
+      });
+    }, IDLE_PANEL_PERIODIC_CHECK_MS));
   }
 
   stopIdlePanelBumpTask() {
-    if (!this.idlePanelBumpTimer) {
-      return;
+    if (this.idlePanelBumpTimer) {
+      clearInterval(this.idlePanelBumpTimer);
+      this.idlePanelBumpTimer = null;
     }
 
-    clearInterval(this.idlePanelBumpTimer);
-    this.idlePanelBumpTimer = null;
+    for (const timeout of this.idlePanelBumpTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    this.idlePanelBumpTimeouts.clear();
   }
 }
 

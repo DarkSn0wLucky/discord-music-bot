@@ -18,6 +18,7 @@ const { resolveSearchCandidates, resolveTracks } = require("../music/resolveTrac
 const {
   BUTTON_IDS,
   buildActionEmbed,
+  buildNoticeEmbed,
   buildPlayerEmbed,
   buildPlaylistNoticeEmbed,
   buildQueueEmbed,
@@ -29,7 +30,7 @@ const EPHEMERAL_REPLY = { flags: MessageFlags.Ephemeral };
 const DEFAULT_MUSIC_CHANNEL_NAME = "\u043c\u0443\u0437\u044b\u043a\u0430";
 const TOO_LONG_NOTICE_AUTO_DELETE_MS = 60_000;
 const playRequestQueueByGuild = new Map();
-const PLAY_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PLAY_REQUEST_TIMEOUT_MS || "0", 10);
+const PLAY_REQUEST_TIMEOUT_MS = Number.parseInt(process.env.PLAY_REQUEST_TIMEOUT_MS || "300000", 10);
 const HAS_PLAY_REQUEST_TIMEOUT = Number.isFinite(PLAY_REQUEST_TIMEOUT_MS) && PLAY_REQUEST_TIMEOUT_MS > 0;
 const PLAY_TIMEOUT_ERROR_CODE = "PLAY_REQUEST_TIMEOUT";
 const URL_RESOLVE_TIMEOUT_MS = Number.parseInt(process.env.URL_RESOLVE_TIMEOUT_MS || "300000", 10);
@@ -49,10 +50,18 @@ const VOICE_PANEL_CHANNEL_OPTIONS_CACHE_TTL_MS = 30_000;
 const voicePanelStateByMessageId = new Map();
 const voicePanelChannelOptionsCacheByGuildId = new Map();
 const queuePickerPageState = new Map();
+const QUEUE_PICKER_STATE_TTL_MS = 10 * 60_000;
 const VOICE_PANEL_OWNER_LOGIN = String(process.env.VOICE_PANEL_OWNER_LOGIN || "darksnowlucky")
   .trim()
   .toLowerCase();
 const VOICE_PANEL_OWNER_ID = String(process.env.VOICE_PANEL_OWNER_ID || "").trim();
+
+function unrefTimer(timer) {
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return timer;
+}
 
 function enqueuePlayRequest(guildId, task) {
   const previous = playRequestQueueByGuild.get(guildId) || Promise.resolve();
@@ -172,13 +181,13 @@ function withPromiseTimeout(promise, timeoutMs, timeoutErrorFactory) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    const timer = unrefTimer(setTimeout(() => {
       if (settled) {
         return;
       }
       settled = true;
       reject(typeof timeoutErrorFactory === "function" ? timeoutErrorFactory() : new Error("Timed out"));
-    }, timeoutMs);
+    }, timeoutMs));
 
     Promise.resolve(promise).then(
       (value) => {
@@ -248,9 +257,20 @@ function getQueuePickerStateKey(interaction) {
   return `${interaction.guildId}:${interaction.user.id}`;
 }
 
+function cleanupQueuePickerState() {
+  const now = Date.now();
+  for (const [key, value] of queuePickerPageState.entries()) {
+    const updatedAt = typeof value === "object" ? Number(value.updatedAt || 0) : 0;
+    if (!updatedAt || now - updatedAt > QUEUE_PICKER_STATE_TTL_MS) {
+      queuePickerPageState.delete(key);
+    }
+  }
+}
+
 function getQueuePickerPage(interaction, totalPages) {
   const key = getQueuePickerStateKey(interaction);
-  const raw = Number(queuePickerPageState.get(key));
+  const entry = queuePickerPageState.get(key);
+  const raw = Number(typeof entry === "object" ? entry.page : entry);
   const maxPage = Math.max(0, totalPages - 1);
   if (!Number.isFinite(raw)) {
     return 0;
@@ -260,7 +280,14 @@ function getQueuePickerPage(interaction, totalPages) {
 
 function setQueuePickerPage(interaction, page) {
   const key = getQueuePickerStateKey(interaction);
-  queuePickerPageState.set(key, Math.max(0, Math.floor(Number(page) || 0)));
+  queuePickerPageState.set(key, {
+    page: Math.max(0, Math.floor(Number(page) || 0)),
+    updatedAt: Date.now(),
+  });
+}
+
+function clearQueuePickerPage(interaction) {
+  queuePickerPageState.delete(getQueuePickerStateKey(interaction));
 }
 
 function buildQueuePickerPayload(player, page, options = {}) {
@@ -362,22 +389,39 @@ function interactionUserFooterLabel(interaction) {
   return name.startsWith("@") ? name : `@${name}`;
 }
 
+function isOwnerInteraction(interaction) {
+  const user = interaction?.user;
+  if (!user) {
+    return false;
+  }
+
+  if (VOICE_PANEL_OWNER_ID && user.id === VOICE_PANEL_OWNER_ID) {
+    return true;
+  }
+
+  const aliases = [user.username, user.globalName, interaction?.member?.displayName]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+  return aliases.includes("darksnowlucky") || aliases.includes(VOICE_PANEL_OWNER_LOGIN);
+}
+
 function stampRequesterDisplayName(tracks, interaction) {
   const label = interactionUserFooterLabel(interaction);
+  const requestedByIsOwner = isOwnerInteraction(interaction);
   for (const track of Array.isArray(tracks) ? tracks : []) {
     if (track && typeof track === "object") {
       track.requestedByDisplayName = label;
+      track.requestedByIsOwner = requestedByIsOwner;
     }
   }
 }
 
-function buildLoopNotice(mode, interaction) {
-  const actor = interactionUserMention(interaction);
+function buildLoopNoticeText(mode) {
   if (mode === "off") {
-    return `Цикл выключен.\nВыключил ${actor}`;
+    return "Цикл выключен.";
   }
 
-  return `Цикл включён: ${loopLabel(mode)}.\nВключил ${actor}`;
+  return `Цикл включён: ${loopLabel(mode)}.`;
 }
 
 async function movePlayerPanelBelowActions(player) {
@@ -442,9 +486,9 @@ async function sendAutoDeletingEphemeralFollowUp(interaction, payload, autoDelet
     .catch(() => null);
 
   if (message && Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
-    setTimeout(() => {
+    unrefTimer(setTimeout(() => {
       message.delete().catch(() => null);
-    }, autoDeleteMs);
+    }, autoDeleteMs));
   }
 
   return message;
@@ -472,7 +516,7 @@ function startUrlResolveHeartbeat(progress) {
     "Формирую список для очереди",
   ];
 
-  const timer = setInterval(() => {
+  const timer = unrefTimer(setInterval(() => {
     if (stopped) {
       return;
     }
@@ -481,7 +525,7 @@ function startUrlResolveHeartbeat(progress) {
     const text = texts[tick % texts.length];
     tick += 1;
     progress.update(percent, text).catch(() => null);
-  }, URL_RESOLVE_HEARTBEAT_INTERVAL_MS);
+  }, URL_RESOLVE_HEARTBEAT_INTERVAL_MS));
 
   return () => {
     stopped = true;
@@ -532,10 +576,15 @@ async function pickTrackFromMenu(interaction, query, tracks) {
 
     const selectedValue = String(selected.customId.split(":").pop());
     if (selectedValue === "cancel") {
-      await selected.update({
-        embeds: [buildActionEmbed("Выбор отменён", "Добавление трека отменено.")],
-        components: [],
-      });
+      await selected.deferUpdate().catch(() => null);
+      await interaction.deleteReply().catch(() => null);
+      await sendAutoDeletingEphemeralFollowUp(
+        selected,
+        {
+          embeds: [buildActionEmbed("Выбор отменён", "Добавление трека отменено.")],
+        },
+        5_000
+      );
       return null;
     }
 
@@ -631,17 +680,47 @@ async function clearDeferredReply(interaction) {
   await interaction.editReply({ content: "\u200b", embeds: [], components: [] }).catch(() => null);
 }
 
+async function sendPlayError(interaction, message, options = {}) {
+  const text = `Ошибка: ${String(message || "неизвестная ошибка")}`;
+  const ownerOnly = isOwnerInteraction(interaction);
+  if (ownerOnly) {
+    if (interaction.deferred || interaction.replied) {
+      await clearDeferredReply(interaction);
+      await interaction.followUp({ content: text, ...EPHEMERAL_REPLY }).catch(() => null);
+    } else {
+      await interaction.reply({ content: text, ...EPHEMERAL_REPLY }).catch(() => null);
+    }
+    return;
+  }
+
+  const payload = options.embed
+    ? { embeds: [options.embed], components: [] }
+    : { content: text, embeds: [], components: [] };
+  if (interaction.deferred || interaction.replied) {
+    await interaction.editReply(payload).catch(async () => {
+      await interaction.followUp(payload).catch(() => null);
+    });
+  } else {
+    await interaction.reply(payload).catch(() => null);
+  }
+}
+
 function isSameVoiceWithBot(interaction, player) {
   const memberVoiceId = interaction.member?.voice?.channelId;
   if (!memberVoiceId) {
     return { ok: false, message: "Зайди в голосовой канал." };
   }
 
-  if (!player.voiceChannelId) {
+  const botVoiceId = interaction.guild?.members?.me?.voice?.channelId || player.voiceChannelId;
+  if (botVoiceId && player.voiceChannelId !== botVoiceId) {
+    player.voiceChannelId = botVoiceId;
+  }
+
+  if (!botVoiceId) {
     return { ok: false, message: "Бот не подключён к голосовому каналу." };
   }
 
-  if (memberVoiceId !== player.voiceChannelId) {
+  if (memberVoiceId !== botVoiceId) {
     return { ok: false, message: "Ты должен быть в том же голосовом канале, что и бот." };
   }
 
@@ -1282,7 +1361,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
   let thinkingTimer = null;
   if (HAS_PLAY_REQUEST_TIMEOUT) {
     const timeoutSec = Math.max(1, Math.round(PLAY_REQUEST_TIMEOUT_MS / 1000));
-    thinkingTimer = setTimeout(async () => {
+    thinkingTimer = unrefTimer(setTimeout(async () => {
       interactionTimedOut = true;
       thinkingTimer = null;
       await interaction
@@ -1296,7 +1375,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
           components: [],
         })
         .catch(() => null);
-    }, PLAY_REQUEST_TIMEOUT_MS);
+    }, PLAY_REQUEST_TIMEOUT_MS));
   }
 
   const clearThinkingTimer = () => {
@@ -1517,6 +1596,7 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
                 actorText: requestedBy,
                 footerText: `Добавил ${interactionUserFooterLabel(interaction)}`,
                 extraText: dropHint,
+                showSource: true,
               })
             : buildActionEmbed(
                 "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u043e\u0447\u0435\u0440\u0435\u0434\u044c",
@@ -1537,28 +1617,19 @@ async function handlePlayRequest(interaction, manager, rawQuery) {
         clearThinkingTimer();
         progress.stop();
         const timeoutSec = Math.max(1, Math.round(URL_RESOLVE_TIMEOUT_MS / 1000));
-        await interaction
-          .editReply({
-            embeds: [
-              buildActionEmbed(
-                "Таймаут разбора ссылки",
-                `Не успел обработать ссылку за ${timeoutSec} сек. Попробуй ещё раз или отправь другую ссылку.`
-              ),
-            ],
-            components: [],
-          })
-          .catch(() => null);
+        await sendPlayError(interaction, `Не успел обработать ссылку за ${timeoutSec} сек. Попробуй ещё раз или отправь другую ссылку.`, {
+          embed: buildActionEmbed(
+            "Таймаут разбора ссылки",
+            `Не успел обработать ссылку за ${timeoutSec} сек. Попробуй ещё раз или отправь другую ссылку.`
+          ),
+        });
         return;
       }
 
       clearThinkingTimer();
       progress.stop();
       console.error("[Command:/play]", { query }, error);
-      if (deferredReplyCleared) {
-        await interaction.followUp(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`).catch(() => null);
-      } else {
-        await interaction.editReply(`\u041e\u0448\u0438\u0431\u043a\u0430: ${error.message}`).catch(() => null);
-      }
+      await sendPlayError(interaction, error.message);
     } finally {
       clearThinkingTimer();
       progress.stop();
@@ -1656,6 +1727,13 @@ async function handleStop(interaction, manager) {
 
   if (result.ok) {
     await interaction.deleteReply().catch(() => null);
+    await interaction
+      .followUp({
+        embeds: [buildNoticeEmbed("Плеер остановлен", "Плеер остановлен.", interactionUserMention(interaction))],
+        allowedMentions: { users: [interaction.user.id] },
+      })
+      .catch(() => null);
+    await movePlayerPanelBelowActions(player);
     return;
   }
 
@@ -1745,10 +1823,15 @@ async function handleLoop(interaction, manager) {
     return;
   }
 
-  await interaction.reply({ content: `Цикл: ${loopLabel(mode)}.` });
+  await interaction.reply({
+    embeds: [buildNoticeEmbed("Цикл", buildLoopNoticeText(mode), interactionUserMention(interaction))],
+    allowedMentions: { users: [interaction.user.id] },
+  });
+  await movePlayerPanelBelowActions(player);
 }
 
 async function handleButton(interaction, manager) {
+  cleanupQueuePickerState();
   if (!(await ensureMusicChannel(interaction))) {
     return;
   }
@@ -1780,6 +1863,7 @@ async function handleButton(interaction, manager) {
   }
 
   if (interaction.customId === QUEUE_PICKER_CLOSE_ID) {
+    clearQueuePickerPage(interaction);
     await interaction.update({
       embeds: [buildActionEmbed("Очередь", "Меню очереди закрыто.")],
       components: [],
@@ -1848,6 +1932,13 @@ async function handleButton(interaction, manager) {
   if (interaction.customId === BUTTON_IDS.stop) {
     const result = await player.stop();
     if (result.ok) {
+      await interaction
+        .followUp({
+          embeds: [buildNoticeEmbed("Плеер остановлен", "Плеер остановлен.", interactionUserMention(interaction))],
+          allowedMentions: { users: [interaction.user.id] },
+        })
+        .catch(() => null);
+      await movePlayerPanelBelowActions(player);
       return;
     }
 
@@ -1867,7 +1958,7 @@ async function handleButton(interaction, manager) {
     const mode = await player.cycleLoopMode();
     await interaction
       .followUp({
-        embeds: [buildActionEmbed("Цикл", buildLoopNotice(mode, interaction))],
+        embeds: [buildNoticeEmbed("Цикл", buildLoopNoticeText(mode), interactionUserMention(interaction))],
         allowedMentions: { users: [interaction.user.id] },
       })
       .catch(() => null);

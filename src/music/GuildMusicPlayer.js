@@ -37,14 +37,55 @@ const PLAY_START_TIMEOUT_MS = 20_000;
 const STREAM_DURATION_PROBE_TIMEOUT_MS = 12_000;
 const MAX_SOURCE_RETRIES_PER_TRACK = 3;
 const ACTION_DEDUPE_WINDOW_MS = 4_000;
-const PLAYBACK_PANEL_UPDATE_MS = 2_000;
+const PLAYBACK_PANEL_UPDATE_MS = 5_000;
 const STARTING_PANEL_UPDATE_MS = 1_000;
+const PANEL_OPERATION_TIMEOUT_MS = 12_000;
+const FALLBACK_RESOLVE_TIMEOUT_MS = 15_000;
+const BUFFERING_STALL_TIMEOUT_MS = 45_000;
 const ENABLE_L2TP_BIND = ["1", "true", "yes", "on", "enabled"].includes(
   String(process.env.ENABLE_L2TP_BIND || "").trim().toLowerCase()
 );
 const cookiesPathCache = new Map();
 let l2tpAddressChecked = false;
 let l2tpAddressAvailable = false;
+
+function unrefTimer(timer) {
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return timer;
+}
+
+function withTimeoutValue(promise, timeoutMs, fallbackValue) {
+  const ms = Math.max(1, Number(timeoutMs) || 1);
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => {
+      timer = unrefTimer(setTimeout(() => resolve(fallbackValue), ms));
+    }),
+  ]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+function isOwnerRequestedTrack(track) {
+  if (track?.requestedByIsOwner) {
+    return true;
+  }
+
+  const ownerId = String(process.env.VOICE_PANEL_OWNER_ID || "").trim();
+  if (ownerId && String(track?.requestedById || "") === ownerId) {
+    return true;
+  }
+
+  const aliases = [track?.requestedByTag, track?.requestedByDisplayName]
+    .filter(Boolean)
+    .map((value) => String(value).trim().toLowerCase());
+  return aliases.includes("darksnowlucky");
+}
 
 function hasLocalAddress(address) {
   const target = String(address || "").trim();
@@ -385,6 +426,7 @@ class GuildMusicPlayer {
     this.panelOperationQueue = Promise.resolve();
     this.lastActionSignature = "";
     this.lastActionAt = 0;
+    this.nonPlayingSince = 0;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -394,6 +436,9 @@ class GuildMusicPlayer {
       console.log(
         `[PlayerState:${this.guild.id}] ${oldState.status} -> ${newState.status} | current=${this.currentTrack?.title || "none"}`
       );
+      if (newState.status === AudioPlayerStatus.Playing || newState.status === AudioPlayerStatus.Idle) {
+        this.nonPlayingSince = 0;
+      }
     });
 
     this.player.on(AudioPlayerStatus.Idle, () => {
@@ -501,15 +546,15 @@ class GuildMusicPlayer {
     this.voiceChannelId = voiceChannel.id;
     this.connection.subscribe(this.player);
 
-    if (this.boundConnection !== this.connection) {
-      this.boundConnection = this.connection;
-      this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-        if (!this.connection) return;
+    if (this.boundConnection !== nextConnection) {
+      this.boundConnection = nextConnection;
+      nextConnection.on(VoiceConnectionStatus.Disconnected, async () => {
+        if (this.connection !== nextConnection) return;
 
         try {
           await Promise.race([
-            entersState(this.connection, VoiceConnectionStatus.Signalling, 5_000),
-            entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
+            entersState(nextConnection, VoiceConnectionStatus.Signalling, 5_000),
+            entersState(nextConnection, VoiceConnectionStatus.Connecting, 5_000),
           ]);
         } catch {
           await this.disconnectFromVoice(false, "РџРѕС‚РµСЂСЏРЅРѕ РіРѕР»РѕСЃРѕРІРѕРµ СЃРѕРµРґРёРЅРµРЅРёРµ.");
@@ -517,7 +562,14 @@ class GuildMusicPlayer {
       });
     }
 
-    await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
+    try {
+      await entersState(nextConnection, VoiceConnectionStatus.Ready, 20_000);
+    } catch (error) {
+      if (this.connection === nextConnection) {
+        await this.disconnectFromVoice(false, "Не удалось подключиться к голосовому каналу.");
+      }
+      throw error;
+    }
   }
 
   async playIfIdle(options = {}) {
@@ -555,6 +607,7 @@ class GuildMusicPlayer {
         }
         this.transitionStartedAt = Date.now();
         this.currentTrack = { ...next, startedAt: null, loadingStartedAt: this.transitionStartedAt };
+        this.nonPlayingSince = 0;
         await this.refreshPanel({ moveToBottom: movePanelToBottomOnStart });
         this.startProgressUpdater();
 
@@ -789,6 +842,7 @@ class GuildMusicPlayer {
                 buildTrackNoticeEmbed(actionTitle, next, {
                   actionText: "Запросил",
                   actorText: requestedBy,
+                  showSource: true,
                 }),
               allowedMentions: next.requestedById ? { users: [next.requestedById] } : undefined,
               dedupeKey: `${dedupePrefix}|${next.url || next.title || ""}|${next.requestedById || ""}`,
@@ -827,6 +881,8 @@ class GuildMusicPlayer {
               searchQuery: fallbackTrack.searchQuery || next.searchQuery,
               requestedById: next.requestedById || fallbackTrack.requestedById,
               requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
+              requestedByDisplayName: next.requestedByDisplayName || fallbackTrack.requestedByDisplayName,
+              requestedByIsOwner: next.requestedByIsOwner || fallbackTrack.requestedByIsOwner,
               triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
               dynamicFallbackTried: Boolean(next.dynamicFallbackTried),
               retryAttempt: retryAttempt + 1,
@@ -858,7 +914,11 @@ class GuildMusicPlayer {
               tag: next.requestedByTag || "unknown",
               username: next.requestedByTag || "unknown",
             };
-            const dynamicCandidates = await resolveSearchCandidates(fallbackQuery, requestedBy, { limit: 8 }).catch(() => []);
+            const dynamicCandidates = await withTimeoutValue(
+              resolveSearchCandidates(fallbackQuery, requestedBy, { limit: 8 }),
+              FALLBACK_RESOLVE_TIMEOUT_MS,
+              []
+            ).catch(() => []);
             const freshCandidates = uniqueTracksByUrl(dynamicCandidates, triedUrls, 5);
 
             if (freshCandidates.length > 0) {
@@ -869,6 +929,8 @@ class GuildMusicPlayer {
                 searchQuery: fallbackQuery,
                 requestedById: next.requestedById || fallbackTrack.requestedById,
                 requestedByTag: next.requestedByTag || fallbackTrack.requestedByTag,
+                requestedByDisplayName: next.requestedByDisplayName || fallbackTrack.requestedByDisplayName,
+                requestedByIsOwner: next.requestedByIsOwner || fallbackTrack.requestedByIsOwner,
                 triedUrls: [...triedUrls, fallbackTrack.url].filter(Boolean),
                 dynamicFallbackTried: true,
                 retryAttempt: retryAttempt + 1,
@@ -890,7 +952,7 @@ class GuildMusicPlayer {
             isYandexPreviewOnlyError(error.message)
               ? "Источник недоступен"
               : "Трек пропущен";
-          await this.sendAction(actionTitle, `**${safeLinkText(next.title)}**\n\`${prettifyPlaybackError(error.message)}\``);
+          await this.sendPlaybackErrorAction(actionTitle, next, `**${safeLinkText(next.title)}**\n\`${prettifyPlaybackError(error.message)}\``);
         }
       }
 
@@ -943,7 +1005,7 @@ class GuildMusicPlayer {
     this.currentTrack = null;
     await this.playNext({
       suppressTrackAction: suppressTrackAction || !skipped,
-      preservePanelMessage,
+      preservePanelMessage: preservePanelMessage || !skipped,
     });
   }
 
@@ -955,6 +1017,9 @@ class GuildMusicPlayer {
     if (this.isPaused()) {
       const resumed = this.player.unpause();
       await this.refreshPanel();
+      if (resumed) {
+        this.startProgressUpdater();
+      }
       return resumed
         ? { ok: true, message: "РџСЂРѕРґРѕР»Р¶Р°СЋ РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёРµ." }
         : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕРґРѕР»Р¶РёС‚СЊ." };
@@ -982,6 +1047,9 @@ class GuildMusicPlayer {
   async resume() {
     const resumed = this.player.unpause();
     await this.refreshPanel();
+    if (resumed) {
+      this.startProgressUpdater();
+    }
     return resumed
       ? { ok: true, message: "РџСЂРѕРґРѕР»Р¶Р°СЋ." }
       : { ok: false, message: "РќРµ СѓРґР°Р»РѕСЃСЊ РїСЂРѕРґРѕР»Р¶РёС‚СЊ." };
@@ -1169,7 +1237,26 @@ class GuildMusicPlayer {
   }
 
   runPanelOperation(operation) {
-    const run = async () => operation();
+    const run = async () => {
+      let timeout = null;
+      try {
+        return await Promise.race([
+          Promise.resolve().then(operation),
+          new Promise((resolve) => {
+            timeout = unrefTimer(
+              setTimeout(() => {
+                console.warn(`[Panel:${this.guild.id}] Panel operation timed out after ${PANEL_OPERATION_TIMEOUT_MS}ms`);
+                resolve(null);
+              }, PANEL_OPERATION_TIMEOUT_MS)
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+      }
+    };
     const next = this.panelOperationQueue.then(run, run);
     this.panelOperationQueue = next.catch(() => null);
     return next;
@@ -1271,6 +1358,29 @@ class GuildMusicPlayer {
     await channel.send({ embeds: [buildQueueEmbed(this)] });
   }
 
+  async sendRequesterPrivateAction(title, track, description, options = {}) {
+    if (!isOwnerRequestedTrack(track) || !track?.requestedById) {
+      return false;
+    }
+
+    const user = await this.client.users.fetch(track.requestedById).catch(() => null);
+    if (!user) {
+      return false;
+    }
+
+    const message = await user.send({ embeds: [options.embed || buildActionEmbed(title, description)] }).catch(() => null);
+    return Boolean(message);
+  }
+
+  async sendPlaybackErrorAction(title, track, description, options = {}) {
+    const sentPrivate = await this.sendRequesterPrivateAction(title, track, description, options);
+    if (sentPrivate) {
+      return;
+    }
+
+    await this.sendAction(title, description, options);
+  }
+
   async sendAction(title, description, options = {}) {
     const channel = await this.getTextChannel();
     if (!channel) return;
@@ -1309,9 +1419,9 @@ class GuildMusicPlayer {
 
     const autoDeleteMs = Number(options.autoDeleteMs);
     if (Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
-      setTimeout(() => {
+      unrefTimer(setTimeout(() => {
         message.delete().catch(() => {});
-      }, autoDeleteMs);
+      }, autoDeleteMs));
     }
   }
 
@@ -1324,8 +1434,35 @@ class GuildMusicPlayer {
 
     const tick = async () => {
       const isStartingTrack = this.currentTrack && !this.currentTrack.startedAt && this.transitionLock;
-      const isPlayingTrack = this.currentTrack && this.player.state.status === AudioPlayerStatus.Playing;
-      if (isStartingTrack || isPlayingTrack) {
+      const playerStatus = this.player.state.status;
+      const isPlayingTrack = this.currentTrack && playerStatus === AudioPlayerStatus.Playing;
+      const isBufferingTrack = this.currentTrack && playerStatus === AudioPlayerStatus.Buffering;
+      if (isPlayingTrack) {
+        this.nonPlayingSince = 0;
+      }
+
+      if (isBufferingTrack) {
+        if (!this.nonPlayingSince) {
+          this.nonPlayingSince = Date.now();
+        }
+
+        if (Date.now() - this.nonPlayingSince > BUFFERING_STALL_TIMEOUT_MS) {
+          const stalledTrack = this.currentTrack;
+          this.forceSkip = true;
+          this.suppressNextTrackAction = true;
+          this.preservePanelOnNextTrack = true;
+          this.cleanupActiveStreamProcess();
+          this.player.stop(true);
+          await this.sendPlaybackErrorAction(
+            "Трек пропущен",
+            stalledTrack,
+            `**${safeLinkText(stalledTrack.title)}** завис при буферизации дольше ${Math.round(BUFFERING_STALL_TIMEOUT_MS / 1000)} сек.`
+          );
+          return;
+        }
+      }
+
+      if (isStartingTrack || isPlayingTrack || isBufferingTrack) {
         await this.refreshPanel().catch(() => {});
       } else {
         this.stopProgressUpdater();
@@ -1336,12 +1473,12 @@ class GuildMusicPlayer {
     const remainder = elapsed % intervalMs;
     const delay = isStarting ? intervalMs : remainder === 0 ? intervalMs : intervalMs - remainder;
 
-    this.updateTimeout = setTimeout(() => {
+    this.updateTimeout = unrefTimer(setTimeout(() => {
       tick().catch(() => {});
-      this.updateInterval = setInterval(() => {
+      this.updateInterval = unrefTimer(setInterval(() => {
         tick().catch(() => {});
-      }, intervalMs);
-    }, delay);
+      }, intervalMs));
+    }, delay));
   }
 
   stopProgressUpdater() {

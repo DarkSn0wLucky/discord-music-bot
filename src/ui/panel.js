@@ -80,6 +80,10 @@ function playlistDisplayUrl(track) {
   return isHttpUrl(url) ? url : "";
 }
 
+function playlistDisplayTitle(track) {
+  return truncate(safeLinkText(firstText(track?.sourcePlaylistTitle, track?.playlistTitle, track?.playlist_title, "плейлист")), 48);
+}
+
 function authorDisplayUrl(track) {
   const directUrl = firstText(track?.authorUrl, track?.channelUrl, track?.channel_url, track?.uploaderUrl, track?.uploader_url);
   if (isHttpUrl(directUrl)) {
@@ -277,7 +281,7 @@ function buildPlayerEmbed(player) {
   const durationMs = Math.max(0, durationMsRaw);
   const loadingStartedAt = Number(track.loadingStartedAt || player.transitionStartedAt || 0);
   const loadingElapsedMs = loadingStartedAt > 0 ? Math.max(0, Date.now() - loadingStartedAt) : 0;
-  const loadingProgressMs = Math.min(loadingElapsedMs, 9_000);
+  const loadingProgressMs = Math.min(loadingElapsedMs, 10_000);
   const barElapsedMs =
     !isStarting && playbackStatus === "playing" && durationMs > 0
       ? Math.min(elapsedMs, Math.max(0, durationMs - 1))
@@ -288,15 +292,16 @@ function buildPlayerEmbed(player) {
   const requestedBy = trackRequesterMention(track);
   const steppedBarElapsedMs = isStarting ? loadingProgressMs : steppedProgressMs(barElapsedMs, durationMs);
   const steppedDisplayElapsedMs = isStarting ? loadingElapsedMs : steppedProgressMs(displayElapsedMs, durationMs);
+  const loadingPercent = Math.max(0, Math.min(100, Math.round((loadingProgressMs / 10_000) * 100)));
   const progressLine = isStarting
     ? visualProgressBar(loadingProgressMs, 10_000, 12)
     : visualProgressBar(steppedBarElapsedMs, durationMs, 12);
-  const elapsedText = isStarting ? `Запускаю трек... ${formatDuration(loadingElapsedMs / 1000)}` : formatDuration(steppedDisplayElapsedMs / 1000);
-  const totalText = durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
+  const elapsedText = isStarting ? "Запускаю трек..." : formatDuration(steppedDisplayElapsedMs / 1000);
+  const totalText = isStarting ? `${loadingPercent}%` : durationMs > 0 ? formatDuration(durationMs / 1000) : "--:--";
   const playlistUrl = playlistDisplayUrl(track);
   const sourceMetaLines = [];
   if (playlistUrl) {
-    sourceMetaLines.push(`Плейлист: ${markdownLink("клик", playlistUrl)}`);
+    sourceMetaLines.push(`Плейлист: ${markdownLink(playlistDisplayTitle(track), playlistUrl)}`);
   }
   sourceMetaLines.push(subtextLine(`${compactSourceName(track)} · Очередь: ${player.queue.length} · ${requestedBy}`));
   const embed = new EmbedBuilder()
@@ -334,6 +339,13 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
       lines.push("");
     }
     lines.push("**Длительность**", formatDuration(durationSec));
+  }
+
+  if (options.showSource) {
+    if (lines.length > 0) {
+      lines.push("");
+    }
+    lines.push("**Источник**", sourceLabel(track));
   }
 
   if (options.extraText) {
@@ -489,6 +501,16 @@ function buildActionEmbed(title, description) {
   return embed;
 }
 
+function buildNoticeEmbed(title, text, actorText) {
+  const lines = [];
+  const body = String(text || "").trim();
+  if (body) {
+    lines.push(body);
+  }
+  lines.push(noticeMetaLine(actorText));
+  return buildActionEmbed(title, lines.join("\n"));
+}
+
 module.exports = {
   BUTTON_IDS,
   buildPlayerEmbed,
@@ -496,6 +518,7 @@ module.exports = {
   buildPanelComponents,
   buildQueueEmbed,
   buildActionEmbed,
+  buildNoticeEmbed,
   buildTrackNoticeEmbed,
   buildPlaylistNoticeEmbed,
   trackDisplayUrl,
