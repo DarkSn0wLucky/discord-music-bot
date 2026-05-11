@@ -760,8 +760,9 @@ function buildVoiceMoveOptions(guild) {
   return options;
 }
 
-function buildVoicePanelComponents(ownerId, guild, hasTarget = false) {
+function buildVoicePanelComponents(ownerId, guild, hasTarget = false, options = {}) {
   const moveOptions = buildVoiceMoveOptions(guild);
+  const confirmKick = Boolean(options?.confirmKick && hasTarget);
 
   const userRow = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
@@ -827,10 +828,26 @@ function buildVoicePanelComponents(ownerId, guild, hasTarget = false) {
       .setCustomId(buildVoicePanelCustomId("action", ownerId, "kick"))
       .setLabel("Кик с сервера")
       .setStyle(ButtonStyle.Danger)
-      .setDisabled(!hasTarget)
+      .setDisabled(!hasTarget || confirmKick)
   );
 
-  return [userRow, actionRow, moveRow, utilityRow];
+  const rows = [userRow, actionRow, moveRow, utilityRow];
+  if (confirmKick) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(buildVoicePanelCustomId("action", ownerId, "kick_confirm"))
+          .setLabel("Да, кикнуть")
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(buildVoicePanelCustomId("action", ownerId, "kick_cancel"))
+          .setLabel("Отмена")
+          .setStyle(ButtonStyle.Secondary)
+      )
+    );
+  }
+
+  return rows;
 }
 
 function buildVoicePanelEmbed({ guild, targetMember, lastAction = "" }) {
@@ -872,7 +889,7 @@ function ensureVoiceTargetForAction(targetMember, actionName) {
     return "Сначала выбери участника.";
   }
 
-  if (actionName === "kick") {
+  if (actionName === "kick" || actionName === "kick_confirm") {
     return "";
   }
 
@@ -981,6 +998,7 @@ async function handleVoicePanel(interaction) {
     ownerId: interaction.user.id,
     guildId: interaction.guildId,
     targetUserId: null,
+    pendingKickUserId: null,
     lastAction: "",
     updatedAt: Date.now(),
   });
@@ -1025,6 +1043,7 @@ async function handleVoicePanelComponent(interaction) {
     ownerId: parsed.ownerId,
     guildId: interaction.guildId,
     targetUserId: null,
+    pendingKickUserId: null,
     lastAction: "",
     updatedAt: Date.now(),
   };
@@ -1032,6 +1051,7 @@ async function handleVoicePanelComponent(interaction) {
   if (parsed.type === "user") {
     const targetUserId = interaction.values?.[0] || null;
     state.targetUserId = targetUserId;
+    state.pendingKickUserId = null;
     state.lastAction = targetUserId ? `Выбран <@${targetUserId}>.` : "Выбор сброшен.";
     state.updatedAt = Date.now();
     voicePanelStateByMessageId.set(messageId, state);
@@ -1039,6 +1059,7 @@ async function handleVoicePanelComponent(interaction) {
     const targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
     if (!targetMember && state.targetUserId) {
       state.targetUserId = null;
+      state.pendingKickUserId = null;
       state.lastAction = "Участник не найден на сервере.";
       state.updatedAt = Date.now();
       voicePanelStateByMessageId.set(messageId, state);
@@ -1056,6 +1077,7 @@ async function handleVoicePanelComponent(interaction) {
   let targetMember = await resolveVoicePanelTargetMember(interaction.guild, state);
   if (!targetMember && state.targetUserId) {
     state.targetUserId = null;
+    state.pendingKickUserId = null;
     state.lastAction = "Выбранный участник не найден на сервере.";
   }
 
@@ -1119,6 +1141,7 @@ async function handleVoicePanelComponent(interaction) {
     const action = parsed.action;
     if (action === "clear") {
       state.targetUserId = null;
+      state.pendingKickUserId = null;
       state.lastAction = "Выбор участника сброшен.";
       state.updatedAt = Date.now();
       voicePanelStateByMessageId.set(messageId, state);
@@ -1132,6 +1155,21 @@ async function handleVoicePanelComponent(interaction) {
       return true;
     }
 
+    if (action === "kick_cancel") {
+      state.pendingKickUserId = null;
+      state.lastAction = "Кик отменён.";
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+
+      await interaction
+        .update({
+          embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+          components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember)),
+        })
+        .catch(() => null);
+      return true;
+    }
+
     if (action !== "refresh") {
       const targetError = ensureVoiceTargetForAction(targetMember, action);
       if (targetError) {
@@ -1140,19 +1178,57 @@ async function handleVoicePanelComponent(interaction) {
       }
     }
 
+    if (action === "kick") {
+      state.pendingKickUserId = targetMember.id;
+      state.lastAction = `Вы уверены что хотите кикнуть <@${targetMember.id}> с сервера?`;
+      state.updatedAt = Date.now();
+      voicePanelStateByMessageId.set(messageId, state);
+
+      await interaction
+        .update({
+          embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+          components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember), {
+            confirmKick: true,
+          }),
+        })
+        .catch(() => null);
+      return true;
+    }
+
+    if (action === "kick_confirm") {
+      if (!state.pendingKickUserId || state.pendingKickUserId !== targetMember.id) {
+        state.pendingKickUserId = null;
+        state.lastAction = "Сначала нажми «Кик с сервера» для выбранного участника.";
+        state.updatedAt = Date.now();
+        voicePanelStateByMessageId.set(messageId, state);
+
+        await interaction
+          .update({
+            embeds: [buildVoicePanelEmbed({ guild: interaction.guild, targetMember, lastAction: state.lastAction })],
+            components: buildVoicePanelComponents(state.ownerId, interaction.guild, Boolean(targetMember)),
+          })
+          .catch(() => null);
+        return true;
+      }
+    }
+
     try {
       const actionText = await executeVoicePanelAction({
-        action,
+        action: action === "kick_confirm" ? "kick" : action,
         targetMember,
         actor: interaction.user,
         destinationChannel: null,
       });
       state.lastAction = actionText;
-      if (action === "kick") {
+      if (action === "kick_confirm") {
         state.targetUserId = null;
+        state.pendingKickUserId = null;
       }
     } catch (error) {
       state.lastAction = `Ошибка: ${error.message}`;
+      if (action === "kick_confirm") {
+        state.pendingKickUserId = null;
+      }
     }
 
     state.updatedAt = Date.now();

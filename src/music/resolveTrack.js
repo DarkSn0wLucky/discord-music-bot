@@ -39,10 +39,12 @@ const YANDEX_PLAYLIST_FETCH_BUDGET_MS = 24_000;
 const YANDEX_PLAYLIST_FETCH_TIMEOUT_MAX_MS = 8_000;
 const YANDEX_PLAYLIST_FETCH_TIMEOUT_MIN_MS = 2_500;
 const VK_RELOAD_AUDIO_CHUNK_SIZE = 10;
+const VK_RELOAD_AUDIO_CONCURRENCY = 2;
 const VK_RELOAD_AUDIO_RETRIES = 3;
 const VK_RELOAD_AUDIO_RETRY_DELAY_MS = 700;
 const VK_RELOAD_AUDIO_CHUNK_DELAY_MS = 250;
 const VK_RELOAD_AUDIO_CACHE_TTL_MS = 15 * 60 * 1000;
+const VK_AUTH_CHECK_CACHE_TTL_MS = 60 * 1000;
 const VK_HTML_RESOLVE_RETRIES = 2;
 const VK_HTML_RESOLVE_RETRY_DELAY_MS = 2_000;
 const VK_LOAD_SECTION_RETRIES = 2;
@@ -58,6 +60,7 @@ const networkCheckCache = new Map();
 const yandexRegionCheckCache = new Map();
 const cookiesFileCache = new Map();
 const vkReloadAudioEntryCache = new Map();
+const vkAuthCheckCache = new Map();
 const yandexPlaylistHintMap = parseYandexPlaylistHints(YANDEX_PLAYLIST_HINTS);
 let l2tpAddressChecked = false;
 let l2tpAddressAvailable = false;
@@ -3830,6 +3833,23 @@ function mergeVkExtractorEntriesByPayloadOrder(payloadItems, ...entryLists) {
   return entries;
 }
 
+function filterVkPayloadItemsWithoutEntries(payloadItems, entries) {
+  const coveredIds = new Set(
+    (Array.isArray(entries) ? entries : [])
+      .map((entry) => String(entry?.id || "").trim())
+      .filter(Boolean)
+  );
+
+  if (coveredIds.size === 0) {
+    return Array.isArray(payloadItems) ? payloadItems : [];
+  }
+
+  return (Array.isArray(payloadItems) ? payloadItems : []).filter((item) => {
+    const id = vkAudioPayloadId(item);
+    return !id || !coveredIds.has(id);
+  });
+}
+
 function countPotentiallyPlayableVkPayloadItems(payloadItems) {
   const seenIds = new Set();
   let count = 0;
@@ -3907,6 +3927,46 @@ function setCachedVkReloadEntry(reloadId, entry) {
   });
 }
 
+function isVkAuthRequiredText(value) {
+  const text = String(value || "");
+  return /login\.vk\.(?:com|ru)|act=login|role=pda_frame/i.test(text);
+}
+
+function createVkAuthRequiredError() {
+  const error = new Error("VK cookies не авторизуют запрос к VK Music. Обнови VK cookies из залогиненного браузера.");
+  error.code = "VK_AUTH_REQUIRED";
+  return error;
+}
+
+async function ensureVkCookiesAuthorized(cookiesPath) {
+  const cacheKey = resolveExistingFilePath(cookiesPath) || String(cookiesPath || "default");
+  const cached = vkAuthCheckCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt <= VK_AUTH_CHECK_CACHE_TTL_MS) {
+    if (cached.ok) {
+      return;
+    }
+    throw createVkAuthRequiredError();
+  }
+
+  const response = await requestTextWithRedirect("https://m.vk.com/audio", {
+    timeoutMs: 8_000,
+    cookiesPath,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+      "accept-language": "ru,en-US;q=0.9,en;q=0.8",
+      referer: "https://vk.com/",
+    },
+  }).catch(() => null);
+
+  const ok = Boolean(response && response.statusCode >= 200 && response.statusCode < 300 && !isVkAuthRequiredText(response.body));
+  vkAuthCheckCache.set(cacheKey, { ok, checkedAt: Date.now() });
+  if (!ok) {
+    throw createVkAuthRequiredError();
+  }
+}
+
 async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath, options = {}) {
   const reloadIds = [];
   const seenReloadIds = new Set();
@@ -3936,8 +3996,13 @@ async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath, o
     missingReloadIds.push(reloadId);
   }
 
+  const chunks = [];
   for (let index = 0; index < missingReloadIds.length; index += VK_RELOAD_AUDIO_CHUNK_SIZE) {
-    const chunk = missingReloadIds.slice(index, index + VK_RELOAD_AUDIO_CHUNK_SIZE);
+    chunks.push(missingReloadIds.slice(index, index + VK_RELOAD_AUDIO_CHUNK_SIZE));
+  }
+
+  let nextChunkIndex = 0;
+  const loadChunk = async (chunk) => {
     let chunkEntries = [];
 
     for (let attempt = 0; attempt <= VK_RELOAD_AUDIO_RETRIES; attempt += 1) {
@@ -3972,6 +4037,9 @@ async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath, o
       }
 
       const parsed = parseJsonPayload(String(response.body || "").replace(/^<!--\s*/u, ""));
+      if (isVkAuthRequiredText(response.body)) {
+        throw createVkAuthRequiredError();
+      }
       const reloadedItems = collectVkAudioPayloadItems(parsed?.data?.[0] || parsed?.payload?.[1] || parsed);
       const attemptEntries = vkAudioPayloadItemsToExtractorEntries(reloadedItems);
       if (attemptEntries.length > chunkEntries.length) {
@@ -3999,11 +4067,21 @@ async function fetchVkReloadAudioEntries(payloadItems, sourceUrl, cookiesPath, o
       setCachedVkReloadEntry(reloadId, entry);
       entryByReloadId.set(reloadId, entry);
     }
+  };
 
-    if (index + VK_RELOAD_AUDIO_CHUNK_SIZE < missingReloadIds.length) {
-      await delayMs(VK_RELOAD_AUDIO_CHUNK_DELAY_MS);
+  const worker = async () => {
+    while (nextChunkIndex < chunks.length) {
+      const chunk = chunks[nextChunkIndex];
+      nextChunkIndex += 1;
+      await loadChunk(chunk);
+      if (nextChunkIndex < chunks.length) {
+        await delayMs(VK_RELOAD_AUDIO_CHUNK_DELAY_MS);
+      }
     }
-  }
+  };
+
+  const concurrency = Math.max(1, Math.min(VK_RELOAD_AUDIO_CONCURRENCY, chunks.length));
+  await Promise.all(Array.from({ length: concurrency }, worker));
 
   const entries = [];
   const seenUrls = new Set();
@@ -4374,7 +4452,12 @@ async function fetchVkPlaylistSectionItems(playlistInfo, cookiesPath, sourceUrl)
         continue;
       }
 
-      parsed = parseJsonPayload(String(response.body || "").replace(/^<!--\s*/u, ""));
+      const responseBody = String(response.body || "");
+      if (isVkAuthRequiredText(responseBody)) {
+        throw createVkAuthRequiredError();
+      }
+
+      parsed = parseJsonPayload(responseBody.replace(/^<!--\s*/u, ""));
       if (parsed) {
         break;
       }
@@ -4493,6 +4576,9 @@ async function fetchVkDirectAudioSectionItems(audioInfo, cookiesPath, sourceUrl)
       }
 
       const bodyText = String(response.body || "").replace(/^<!--\s*/u, "");
+      if (isVkAuthRequiredText(bodyText)) {
+        throw createVkAuthRequiredError();
+      }
       const parsed = parseJsonPayload(bodyText);
       const allPayloadItems = parsed
         ? collectVkAudioPayloadItemsDeep(parsed)
@@ -4555,7 +4641,12 @@ async function resolveVkDirectAudioUrl(url, requestedBy, cookiesPath) {
 async function resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath) {
   const playlistInfo = parseVkPlaylistInfoFromUrl(url);
   const sectionData = playlistInfo ? await fetchVkPlaylistSectionItems(playlistInfo, cookiesPath, url) : null;
-  const pages = await fetchVkPlaylistHtmlPages(url, cookiesPath);
+  const shouldFetchHtmlPages =
+    !playlistInfo ||
+    !sectionData?.payloadItems?.length ||
+    !String(sectionData?.title || "").trim() ||
+    !(Number(sectionData?.totalItems) > 0);
+  const pages = shouldFetchHtmlPages ? await fetchVkPlaylistHtmlPages(url, cookiesPath) : [];
   if (pages.length === 0 && !sectionData?.payloadItems?.length) {
     return null;
   }
@@ -4593,8 +4684,11 @@ async function resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath) {
     ? Math.min(rawExpectedItems, MAX_PLAYLIST_ITEMS)
     : rawExpectedItems;
   const directEntries = vkAudioPayloadItemsToExtractorEntries(payloadItems);
-  const reloadedEntries = await fetchVkReloadAudioEntries(payloadItems, sourceUrl || url, cookiesPath);
-  const entries = applyPlaylistLimit(mergeVkExtractorEntriesByPayloadOrder(payloadItems, reloadedEntries, directEntries));
+  const reloadPayloadItems = filterVkPayloadItemsWithoutEntries(payloadItems, directEntries);
+  const reloadedEntries = reloadPayloadItems.length > 0
+    ? await fetchVkReloadAudioEntries(reloadPayloadItems, sourceUrl || url, cookiesPath)
+    : [];
+  const entries = applyPlaylistLimit(mergeVkExtractorEntriesByPayloadOrder(payloadItems, directEntries, reloadedEntries));
   if (entries.length === 0) {
     return null;
   }
@@ -4624,7 +4718,12 @@ async function resolveVkUrlViaHtml(url, requestedBy, cookiesPath) {
       await delayMs(VK_HTML_RESOLVE_RETRY_DELAY_MS * attempt);
     }
 
-    const resolved = await resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath).catch(() => null);
+    const resolved = await resolveVkUrlViaHtmlOnce(url, requestedBy, cookiesPath).catch((error) => {
+      if (error?.code === "VK_AUTH_REQUIRED") {
+        throw error;
+      }
+      return null;
+    });
     if (!resolved) {
       continue;
     }
@@ -5050,10 +5149,14 @@ async function resolveVkUrl(url, requestedBy) {
   const cookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
   const playlistLike = isVkPlaylistLikeUrl(normalizedUrl);
   const directAudioLike = !playlistLike && Boolean(parseVkAudioInfoFromUrl(normalizedUrl));
+  if (playlistLike) {
+    await ensureVkCookiesAuthorized(cookiesPath);
+  }
+
   const htmlResolved = playlistLike
     ? await resolveVkUrlViaHtml(normalizedUrl, requestedBy, cookiesPath)
     : directAudioLike
-      ? await resolveVkDirectAudioUrl(normalizedUrl, requestedBy, cookiesPath)
+      ? await resolveVkDirectAudioUrl(url, requestedBy, cookiesPath)
     : null;
 
   if (htmlResolved) {
@@ -5409,7 +5512,9 @@ async function resolveTracks(query, requestedBy) {
       isVkMusicUrl = false;
     }
 
+    let vkResolveError = null;
     const vkResolved = await resolveVkUrl(input, requestedBy).catch((error) => {
+      vkResolveError = error;
       console.warn(`[Resolve] VK URL fallback (${input}): ${error.message}`);
       return null;
     });
@@ -5424,6 +5529,12 @@ async function resolveTracks(query, requestedBy) {
     }
 
     if (isVkMusicUrl) {
+      if (vkResolveError?.code === "VK_AUTH_REQUIRED") {
+        throw new Error(
+          "VK cookies не авторизуют запрос к VK Music с сервера. Открой Chrome-профиль для cookies, войди в VK и дождись автообновления cookies."
+        );
+      }
+
       const vkCookiesPath = VK_COOKIES_PATH || YTDLP_COOKIES_PATH;
       const cookieHint = hasVkAuthenticatedCookies(vkCookiesPath)
         ? "Проверь, что VK cookies файл (VK_COOKIES_PATH) свежий и у аккаунта есть доступ к этому треку или плейлисту."
