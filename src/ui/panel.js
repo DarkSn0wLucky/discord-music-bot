@@ -119,10 +119,14 @@ function subtextLine(text) {
   return `-# ${String(text || "").trim()}`;
 }
 
-function noticeMetaLine(actorText) {
+function noticeMetaText(actorText) {
   const timestamp = `<t:${Math.floor(Date.now() / 1000)}:t>`;
   const actor = String(actorText || "").trim();
-  return subtextLine([`Сегодня, в ${timestamp}`, actor].filter(Boolean).join(" · "));
+  return [`Сегодня, в ${timestamp}`, actor].filter(Boolean).join(" · ");
+}
+
+function noticeMetaLine(actorText) {
+  return subtextLine(noticeMetaText(actorText));
 }
 
 function compactTitle(track) {
@@ -341,20 +345,19 @@ function buildTrackNoticeEmbed(title, track, options = {}) {
     lines.push("**Длительность**", formatDuration(durationSec));
   }
 
-  if (options.showSource) {
-    if (lines.length > 0) {
-      lines.push("");
-    }
-    lines.push("**Источник**", sourceLabel(track));
-  }
-
   if (options.extraText) {
     const extraText = String(options.extraText).trim();
     if (extraText) {
       lines.push(extraText);
     }
   }
-  lines.push(noticeMetaLine(actorText || trackRequesterMention(track)));
+
+  const metaParts = [];
+  if (options.showSource) {
+    metaParts.push(sourceLabel(track));
+  }
+  metaParts.push(noticeMetaText(actorText || trackRequesterMention(track)));
+  lines.push(subtextLine(metaParts.filter(Boolean).join(" · ")));
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR_HEX)
@@ -491,8 +494,11 @@ function buildQueueEmbed(player) {
     .setFooter({ text: `Цикл: ${loopLabel(player.loopMode)}` });
 }
 
-function buildActionEmbed(title, description) {
-  const embed = new EmbedBuilder().setColor(EMBED_COLOR_HEX).setDescription(description).setTimestamp(new Date());
+function buildActionEmbed(title, description, options = {}) {
+  const embed = new EmbedBuilder().setColor(EMBED_COLOR_HEX).setDescription(description);
+  if (options.timestamp !== false) {
+    embed.setTimestamp(new Date());
+  }
 
   if (title) {
     embed.setTitle(title);
@@ -507,8 +513,11 @@ function buildNoticeEmbed(title, text, actorText) {
   if (body) {
     lines.push(body);
   }
+  if (lines.length > 0) {
+    lines.push("");
+  }
   lines.push(noticeMetaLine(actorText));
-  return buildActionEmbed(title, lines.join("\n"));
+  return buildActionEmbed(title, lines.join("\n"), { timestamp: false });
 }
 
 module.exports = {

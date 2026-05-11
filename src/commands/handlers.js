@@ -482,16 +482,33 @@ async function sendAutoDeletingEphemeralFollowUp(interaction, payload, autoDelet
     .followUp({
       ...payload,
       ...EPHEMERAL_REPLY,
+      fetchReply: true,
     })
     .catch(() => null);
 
-  if (message && Number.isFinite(autoDeleteMs) && autoDeleteMs > 0) {
-    unrefTimer(setTimeout(() => {
-      message.delete().catch(() => null);
-    }, autoDeleteMs));
-  }
+  deleteInteractionMessageLater(interaction, message, autoDeleteMs);
 
   return message;
+}
+
+function deleteInteractionMessageLater(interaction, message, autoDeleteMs) {
+  if (!message || !(Number.isFinite(autoDeleteMs) && autoDeleteMs > 0)) {
+    return;
+  }
+
+  const messageId = String(message.id || "").trim();
+  unrefTimer(setTimeout(async () => {
+    if (messageId && interaction?.webhook?.deleteMessage) {
+      const deleted = await interaction.webhook.deleteMessage(messageId).then(() => true, () => false);
+      if (deleted) {
+        return;
+      }
+    }
+
+    if (typeof message.delete === "function") {
+      await message.delete().catch(() => null);
+    }
+  }, autoDeleteMs));
 }
 
 async function sendTooLongTracksNotice(interaction, tooLongTracks, maxDurationSec) {
@@ -1823,10 +1840,14 @@ async function handleLoop(interaction, manager) {
     return;
   }
 
-  await interaction.reply({
-    embeds: [buildNoticeEmbed("Цикл", buildLoopNoticeText(mode), interactionUserMention(interaction))],
-    allowedMentions: { users: [interaction.user.id] },
-  });
+  const message = await interaction
+    .reply({
+      embeds: [buildNoticeEmbed("Цикл", buildLoopNoticeText(mode), interactionUserMention(interaction))],
+      allowedMentions: { users: [interaction.user.id] },
+      fetchReply: true,
+    })
+    .catch(() => null);
+  deleteInteractionMessageLater(interaction, message, 60_000);
   await movePlayerPanelBelowActions(player);
 }
 
@@ -1956,12 +1977,14 @@ async function handleButton(interaction, manager) {
 
   if (interaction.customId === BUTTON_IDS.loop) {
     const mode = await player.cycleLoopMode();
-    await interaction
+    const message = await interaction
       .followUp({
         embeds: [buildNoticeEmbed("Цикл", buildLoopNoticeText(mode), interactionUserMention(interaction))],
         allowedMentions: { users: [interaction.user.id] },
+        fetchReply: true,
       })
       .catch(() => null);
+    deleteInteractionMessageLater(interaction, message, 60_000);
     await movePlayerPanelBelowActions(player);
     return;
   }

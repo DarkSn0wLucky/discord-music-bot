@@ -3390,6 +3390,23 @@ function toVkTrack(entry, requestedBy, fallbackUrl, options = {}) {
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
   };
   const searchQuery = buildQueryFromArtistTitle(metadata.artist, metadata.title) || title;
+  const thumbnail = firstVkCoverUrl(
+    entry?.thumbnail,
+    entry?.thumbnails,
+    entry?.cover,
+    entry?.coverUrl,
+    entry?.cover_url,
+    entry?.thumb,
+    entry?.thumb_url,
+    entry?.photo,
+    entry?.photo_200,
+    entry?.photo_300,
+    entry?.album?.cover,
+    entry?.album?.coverUrl,
+    entry?.album?.thumb,
+    entry?.album?.photo_200,
+    entry?.album?.photo_300
+  );
 
   return {
     externalId: String(entry?.id || "").trim(),
@@ -3404,7 +3421,7 @@ function toVkTrack(entry, requestedBy, fallbackUrl, options = {}) {
     views: Number(entry?.view_count) || 0,
     durationSec,
     durationMs: durationSec > 0 ? durationSec * 1000 : 0,
-    thumbnail: entry?.thumbnail || null,
+    thumbnail,
     requestedById: requestedBy.id,
     requestedByTag: requestedBy.tag || requestedBy.username,
     searchQuery,
@@ -3556,13 +3573,94 @@ function collectVkAudioPayloadItemsDeep(value, seen = new WeakSet()) {
   return Object.values(value).flatMap((item) => collectVkAudioPayloadItemsDeep(item, seen));
 }
 
-function firstVkCoverUrl(value) {
-  const text = firstNonEmpty(value);
+function normalizeVkCoverUrl(value) {
+  let text = String(value || "").trim();
   if (!text) {
     return null;
   }
 
-  return text.split(",").map((item) => item.trim()).filter(Boolean).pop() || null;
+  if (text.startsWith("//")) {
+    text = `https:${text}`;
+  }
+
+  return /^https?:\/\//i.test(text) ? text : null;
+}
+
+function firstVkCoverUrl(...values) {
+  const candidates = [];
+  const seen = new WeakSet();
+
+  const collect = (value) => {
+    if (value === null || value === undefined || value === "") {
+      return;
+    }
+
+    if (typeof value === "string" || typeof value === "number") {
+      const parts = String(value).split(",").map((item) => item.trim()).filter(Boolean);
+      candidates.push(...parts.reverse());
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        collect(value[index]);
+      }
+      return;
+    }
+
+    if (typeof value !== "object") {
+      return;
+    }
+
+    if (seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+
+    const fields = [
+      "url",
+      "src",
+      "thumbnail",
+      "thumb",
+      "thumb_url",
+      "cover",
+      "cover_url",
+      "coverUrl",
+      "photo",
+      "photo_50",
+      "photo_100",
+      "photo_200",
+      "photo_300",
+      "photo_600",
+      "large",
+      "small",
+      "maxres",
+      "high",
+      "medium",
+      "default",
+      "sizes",
+      "image",
+      "images",
+      "thumbnails",
+    ];
+
+    for (const field of fields) {
+      collect(value[field]);
+    }
+  };
+
+  for (const value of values) {
+    collect(value);
+  }
+
+  for (const candidate of candidates) {
+    const normalized = normalizeVkCoverUrl(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  return null;
 }
 
 function vkAudioPayloadToExtractorEntry(rawAudio) {
@@ -3582,7 +3680,24 @@ function vkAudioPayloadToExtractorEntry(rawAudio) {
     rawAudio?.author
   ));
   const duration = Number(isFieldArray ? rawAudio[5] : rawAudio?.duration) || 0;
-  const coverUrl = firstVkCoverUrl(isFieldArray ? rawAudio[14] : firstNonEmpty(rawAudio?.coverUrl, rawAudio?.cover_url));
+  const coverUrl = firstVkCoverUrl(
+    isFieldArray ? rawAudio[14] : null,
+    rawAudio?.coverUrl,
+    rawAudio?.cover_url,
+    rawAudio?.cover,
+    rawAudio?.thumb,
+    rawAudio?.thumb_url,
+    rawAudio?.thumbnail,
+    rawAudio?.photo,
+    rawAudio?.photo_200,
+    rawAudio?.photo_300,
+    rawAudio?.album?.cover,
+    rawAudio?.album?.coverUrl,
+    rawAudio?.album?.thumb,
+    rawAudio?.album?.photo_200,
+    rawAudio?.album?.photo_300,
+    rawAudio?.thumbnails
+  );
   const rawDecoderVkId = isFieldArray ? rawAudio[15]?.vk_id : firstNonEmpty(rawAudio?.vk_id, rawAudio?.extra?.vk_id);
   const decoderVkId = rawDecoderVkId === undefined || rawDecoderVkId === null || rawDecoderVkId === ""
     ? ownerId
